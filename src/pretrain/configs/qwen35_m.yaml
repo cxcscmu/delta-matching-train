@@ -1,0 +1,89 @@
+# QWEN3.5-2B-BASE ARCHITECTURE, M-tier training setup (2026-08-04).
+#
+# Ported verbatim from https://huggingface.co/Qwen/Qwen3.5-2B-Base `config.json.text_config`,
+# with ONE deliberate deviation: vocab_size. Qwen ships 248320 tokens; our corpus
+# (nemotron_rs, 40.47B tokens) is tokenized with the Llama-2 32k vocab and byte-verified on
+# every node, so adopting Qwen's vocab would mean re-tokenizing 40B tokens for no scientific
+# gain. Vocabulary is a tokenizer artifact, not an architectural choice, so we keep 32000.
+# That is the whole difference between "2B" and this config's 1.665B: Qwen's embedding table
+# alone is 248320 x 2048 = 508M parameters against our 65.5M.
+#
+# WHAT CARRIES OVER EXACTLY:
+#   layer_types      [linear, linear, linear, full] x 6   (full_attention_interval: 4)
+#                    -> our [gated_deltanet x3, gqa] x6 = 18 GDN + 6 attention. The reference
+#                       model is already a 3:1 linear/full hybrid.
+#   hidden_size      2048
+#   intermediate_size 6144
+#   num_attention_heads 8, num_key_value_heads 2, head_dim 256   (GQA n_rep 4; q_dim == d_model)
+#   attn_output_gate true                (q_proj emits 2*q_dim; out * sigmoid(gate) pre-o_proj)
+#   partial_rotary_factor 0.25           (64 of 256 channels rotated, 192 passed through)
+#   rope_theta 1e7, rms_norm_eps 1e-6, tie_word_embeddings true
+#   linear attention 16 heads x 128      (gdn_head_dim/gdn_num_heads, decoupled from head_dim)
+#
+# DELIBERATELY DROPPED (not architecture, or out of scope for a text-only precision study):
+#   vision_config / image+video tokens, mrope_interleaved + mrope_section (multimodal RoPE
+#   degenerates to standard RoPE on text-only input), mtp_num_hidden_layers (multi-token
+#   prediction head), max_position_embeddings 262144 (we train at 8192 like every other arm).
+#
+# NOTE at head_dim 256 the fp8 attention kernel's block-scale contract is [64, 32] (Q/dO rows, K/V keys per
+# scale) against [128, 64] at head_dim 128, i.e. half the quantization block granularity. Every arm of a
+# cell shares the head dim, so within-study comparisons are matched.
+run_name: qwen35_m
+backend: fsdp2
+
+global_batch_size: 128
+per_device_batch_size: 2        # 1.665B at 8k -> ga 8 at 8 GPUs (GBS 128 exact)
+num_steps: 28610                # 28610 x 128 x 8192 = 30.0B tokens
+hf_export_steps: [1192, 2384, 4768, 9537, 19073]
+
+gradient_checkpointing: true
+ac_mode: selective
+fused_ce: true
+compile: false
+fp8: false
+bf16: true
+
+save_interval: 1192
+save_total_limit: null
+seed: 11785
+hf_save_dir:   workspace/hf/qwen35_m
+ckpt_root_dir: workspace/ckpts
+log_root_dir:  workspace/logs
+
+model:
+  vocab_size: 32000             # DEVIATION from Qwen's 248320: see header
+  d_model: 2048
+  n_layers: 24
+  n_heads: 8
+  n_kv_heads: 2
+  head_dim: 256
+  max_seq_len: 8192
+  layer_mixers: [gated_deltanet, gated_deltanet, gated_deltanet, gqa]
+  intermediate_size: 6144
+  gdn_head_dim: 128             # linear_key_head_dim / linear_value_head_dim
+  gdn_num_heads: 16             # linear_num_key_heads / linear_num_value_heads
+  attn_output_gate: true
+  partial_rotary_factor: 0.25
+  qk_norm: true
+  attn_impl: sdpa
+  rope_theta: 10000000
+  norm_eps: 1.0e-6
+  tie_embeddings: true
+  z_loss_weight: 1.0e-4
+
+optim:
+  lr: 2.4e-3                     # set by a learning-rate sweep on a 0.23 B proxy of this architecture (10 B tokens)
+  betas: [0.9, 0.95]
+  weight_decay: 0.1
+  max_grad_norm: 1.0
+  lr_scheduler_type: wsd
+  warmup_ratio: 0.0333
+  decay_ratio: 0.2
+  decay_type: linear
+
+data:
+  paths:       workspace/data/nemotron_cc_v2d1_hq_dqa/nemotron_rs_train.bin
+  doc_lengths: workspace/data/nemotron_cc_v2d1_hq_dqa/nemotron_rs_train.doc_lengths.npy
+  dtype: uint16
+  position_mode: packed
+  seed: 11785

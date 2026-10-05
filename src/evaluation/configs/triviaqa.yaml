@@ -1,0 +1,12 @@
+# TriviaQA, closed-book, 5-shot exact match (Joshi et al., 2017): the harness task `triviaqa` on mandarjoshi/trivia_qa
+# rc.nocontext, 17,944 validation questions, greedy generation until newline / period / comma, exact match after
+# lower-casing and punctuation removal against the answer aliases; the five shots come from the train split.
+# The protocol of docs/benchmark.md section 7; runs through the in-repo engine like the extraction tasks.
+name: triviaqa
+type: lm_eval_harness
+max_length: 4096
+max_new_tokens: 32
+num_fewshot: 5
+tasks:
+  - name: triviaqa
+    metric: exact_match,remove_whitespace

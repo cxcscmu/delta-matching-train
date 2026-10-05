@@ -1,0 +1,16 @@
+name: recall_extraction
+type: lm_eval_harness
+# Real-document in-context EXTRACTION recall: the `based`/Zoology benchmark:
+# SWDE (structured-web attribute extraction), FDA (510k-summary field extraction), SQuAD (completion).
+# Each is generate_until (until "\n"/"\n\n") scored by `contains` (does the generation contain the gold
+# value). These are the recall tasks where the GDN paper shows attention/hybrids beat pure-recurrent.
+# .generate path → runs through the dmlm engine when EVAL_ENGINE=mini_eval_dev (short gens; big speedup).
+max_length: 8192        # SWDE/FDA docs are ~1–2k tok; cap at the 8k train length (left-truncate longer)
+max_new_tokens: 256     # CEILING (wrapper asserts each task's request <= this): swde/fda use 48, squad_completion uses 256
+tasks:
+  - name: swde
+    metric: contains,none
+  - name: fda
+    metric: contains,none
+  - name: squad_completion
+    metric: contains,none

@@ -1,0 +1,18 @@
+name: ruler_llama2_smoke
+type: ruler
+# SMOKE subset of ruler_llama2.yaml: validates the dmlm engine path end-to-end fast:
+#   8192 = in-distribution (training length); 32768 = the GQA-KV memory stress (48 KB/tok x 32k x N_seq).
+#   niah_single_1 = basic retrieval; qa_1 = QA stopping behaviour (eos). max_samples caps it to ~quick.
+data_dir: workspace/data/ruler-500-llama2
+lengths: [8192, 32768]
+max_samples: 16
+verbose: true
+tasks:
+  - {name: niah_single_1, subset: validation}
+  - {name: qa_1,          subset: validation}
+generation_config:
+  do_sample: false
+  temperature: 0
+  top_k: 32
+  top_p: 1.0
+  stop: ""

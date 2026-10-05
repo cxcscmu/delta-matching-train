@@ -1,0 +1,25 @@
+name: commonsense
+type: lm_eval_harness
+max_length: 4096
+# General-LM + commonsense suite (LAMBADA, HellaSwag, PIQA, ARC-E, SciQ, OBQA, WinoGrande,
+# COPA, +ARC-C). All loglikelihood/MC (.forward; NO engine). acc_norm where defined; acc for the binary
+# tasks (lambada/winogrande/copa). Reported per-task + as the suite average.
+tasks:
+  - name: lambada_openai
+    metric: acc,none
+  - name: hellaswag
+    metric: acc_norm,none
+  - name: piqa
+    metric: acc_norm,none
+  - name: arc_easy
+    metric: acc_norm,none
+  - name: sciq
+    metric: acc_norm,none
+  - name: openbookqa
+    metric: acc_norm,none
+  - name: winogrande
+    metric: acc,none
+  - name: copa
+    metric: acc,none
+  - name: arc_challenge
+    metric: acc_norm,none

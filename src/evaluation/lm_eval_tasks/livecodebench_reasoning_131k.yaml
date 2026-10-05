@@ -1,0 +1,40 @@
+task: livecodebench_reasoning_131k
+# 131072-budget LiveCodeBench (the engine makes this budget affordable; the official ns_livecodebench
+# recipe budget is 131072). Reuses livecodebench_reasoning_utils (byte-exact NVIDIA default_reasoning
+# prompt + the vendored LCB grader). Window: release_v6, contests 2024-08..2025-05 (the model card's v6
+# row, 454 problems), the default of process_docs_v6; LCB_START_DATE / LCB_END_DATE override it.
+dataset_path: livecodebench/code_generation_lite
+dataset_name: release_v6
+dataset_kwargs:
+  # refs/pr/7 exposes the test cases as datasets>=4-compatible strings (private_test_cases is a
+  # base64+zlib+pickle blob -> the _decode_tests fallback in the utils handles it). A PR ref can move;
+  # for a fixed problem set pin the commit it points to (see livecodebench_reasoning.yaml).
+  revision: "refs/pr/7"
+test_split: test
+unsafe_code: true                 # executes model-generated code: runs only with DM_ALLOW_CODE_EVAL=1 (meta_eval)
+output_type: generate_until       # explicit (the 32k dev task relied on lm_eval's default)
+process_docs: !function livecodebench_reasoning_utils.process_docs_v6   # contests 2024-08..2025-05
+doc_to_text: !function livecodebench_reasoning_utils.doc_to_text
+doc_to_target: question_id
+process_results: !function livecodebench_reasoning_utils.process_results
+num_fewshot: 0
+generation_kwargs:
+  until:
+    - "<|im_end|>"
+  do_sample: true
+  temperature: 0.99999          # OFFICIAL NVIDIA recipe global (aai 0.99999 base params), shared
+  top_p: 0.99999                #  with GPQA/AIME; ns_livecodebench does NOT override temp/top_p.
+  top_k: 0
+  max_gen_toks: 131072          # 32768 -> 131072 (the recipe budget; the dev config capped at 32k)
+repeats: 8                       # ns_livecodebench num_repeats: 8 -> pass@1[avg-of-8]
+filter_list:
+  - name: all
+    filter:
+      - function: custom
+        filter_fn: !function livecodebench_reasoning_utils.keep_all
+metric_list:
+  - metric: pass_at_1
+    aggregation: mean
+    higher_is_better: true
+metadata:
+  version: 1.0

@@ -1,0 +1,16 @@
+# One RULER task at 2048 tokens, four samples, for the eval smoke test (the test rewrites data_dir to
+# <data root>/ruler-500-llama2).
+name: ruler_tiny
+type: ruler
+data_dir: SET_BY_THE_TEST
+lengths: [2048]
+max_samples: 4
+verbose: true
+tasks:
+  - {name: niah_single_1, subset: validation}
+generation_config:
+  do_sample: false
+  temperature: 0
+  top_k: 32
+  top_p: 1.0
+  stop: ""

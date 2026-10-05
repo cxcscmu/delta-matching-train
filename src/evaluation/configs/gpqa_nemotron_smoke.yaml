@@ -1,0 +1,15 @@
+name: gpqa_smoke
+type: lm_eval_harness
+# SMOKE variant of gpqa_nemotron.yaml: tiny 1024-token budget + 2 repeats to validate the
+# sampling / generate_until / </think>-strip plumbing fast (scores are meaningless here).
+apply_chat_template: true
+enable_thinking: true
+strip_reasoning: true
+max_length: 2048
+max_new_tokens: 1024
+include_path: src/evaluation/lm_eval_tasks
+keys_to_remove_in_save: ["doc", "target"]
+tasks:
+  - name: gpqa_diamond_reasoning_smoke
+    metric: exact_match,all
+    display_name: gpqa_diamond_smoke

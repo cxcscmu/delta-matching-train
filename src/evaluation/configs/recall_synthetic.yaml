@@ -1,0 +1,17 @@
+name: recall_synthetic
+type: recall
+mode: synthetic_kv          # token-space MQAR (in-context associative recall)
+# Degradation matrix grid: num_kv_pairs x seq_len. A cell needs 4 * num_kv_pairs <= seq_len (the key-value context
+# plus the queries region); other cells are skipped (logged, not fatal). So the 8192-pairs row never runs on these
+# seq_lens (it needs 32768): it is kept so the results JSON matches the published runs.
+num_kv_pairs: [64, 128, 256, 512, 1024, 2048, 4096, 8192]
+seq_lens: [2048, 4096, 8192, 16384]
+num_examples: 256
+# Fallback only: the evaluator reads the loaded model's actual config.vocab_size.
+vocab_size: 32000
+power_a: 0.01
+random_non_queries: true
+seed: 11785
+# examples per forward pass on each rank (data-parallel within rank). This value takes precedence over
+# meta_eval's --eval_batch_size (the recall evaluator reads eval_config.get("batch_size", <cli value>)).
+batch_size: 8

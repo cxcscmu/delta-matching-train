@@ -1,0 +1,67 @@
+# 3:1 GatedDeltaNet : MLA hybrid, the 1.665 B twin of qwen35_m.yaml at head_dim 128 (modeling/mla.py).
+# Every attention layer is Multi-head Latent Attention: 16 heads,
+# per head [rope 64 | nope 64] query/key and a 128-wide value (one head dim, so the Delta-Matching-128 kernels are used
+# as they are), keys and values reconstructed from a 384-wide joint latent (kv_lora_rank), MHA on the wire (n_kv_heads
+# 16). kv_lora_rank 384 gives parameter parity with the 16q/4kv GQA twin to +384 params per attention layer (the FFN
+# and everything else are byte-identical). Declared deviations from DeepSeek-V3: v 128 (the kernel contract), no
+# query LoRA, four per-sub-vector RMSNorms in place of one per-head qk-norm, the output gate kept (the hybrid's
+# idiom), v_proj init std raised by sqrt(d_model / kv_lora_rank). Arms: mla_clean_hd128 (this mixer list),
+# mla_dm_stale_hd128 / mla_dm_matched_hd128 (layer_mixers with mla_dm, set by the launcher).
+run_name: qwen35_m_mla
+backend: fsdp2
+global_batch_size: 128
+per_device_batch_size: 4   # 2026-09-19: 2 -> 4, so grad_accum = 128/(8*4) = 4 instead of 8 (same change as
+                           # qwen35_m_mamba2.yaml). global_batch_size stays 128, so tokens/step (1,048,576),
+                           # the 30.0B budget, the WSD schedule and the data order are unchanged: a pure
+                           # micro-batching/throughput change that keeps the cells comparable.
+                           # Below 100 GB per GPU the launcher passes 2 instead (scripts/campaign/arms.sh).
+num_steps: 28610
+hf_export_steps: []
+gradient_checkpointing: true
+ac_mode: selective
+fused_ce: true
+compile: false
+fp8: false
+bf16: true
+save_interval: 1192
+save_total_limit: null
+seed: 11785
+hf_save_dir:   workspace/hf/qwen35_m_mla
+ckpt_root_dir: workspace/ckpts
+log_root_dir:  workspace/logs
+model:
+  vocab_size: 32000
+  d_model: 2048
+  n_layers: 24
+  n_heads: 16
+  n_kv_heads: 16
+  head_dim: 128
+  kv_lora_rank: 384
+  max_seq_len: 8192
+  layer_mixers: [gated_deltanet, gated_deltanet, gated_deltanet, mla]
+  intermediate_size: 6144
+  gdn_head_dim: 128
+  gdn_num_heads: 16
+  attn_output_gate: true
+  partial_rotary_factor: 0.5
+  qk_norm: true
+  attn_impl: sdpa
+  rope_theta: 10000000
+  norm_eps: 1.0e-6
+  tie_embeddings: true
+  z_loss_weight: 1.0e-4
+optim:
+  lr: 2.4e-3
+  betas: [0.9, 0.95]
+  weight_decay: 0.1
+  max_grad_norm: 1.0
+  lr_scheduler_type: wsd
+  warmup_ratio: 0.0333
+  decay_ratio: 0.2
+  decay_type: linear
+data:
+  paths:       workspace/data/nemotron_cc_v2d1_hq_dqa/nemotron_rs_train.bin
+  doc_lengths: workspace/data/nemotron_cc_v2d1_hq_dqa/nemotron_rs_train.doc_lengths.npy
+  dtype: uint16
+  position_mode: packed
+  seed: 11785

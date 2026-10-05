@@ -1,0 +1,115 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]   # >= 77: the SPDX `license` string and `license-files`
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "delta-matching-train"
+version = "1.0.0"
+description = "Delta-Matching: pair-consistent fp8 attention training (the pretraining engine and the evaluation suite of the study)"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"]
+authors = [{ name = "Haozhan Tang" }]
+# The importable core. The exact, tested versions are in env/requirements-cu130-hopper.lock.txt (torch 2.12.0+cu130,
+# Hopper, CUDA 13.0); docs/SETUP.md explains the install order (torch from the cu130 index first, then the source-built
+# kernels: flash_attn 2.8.3.post1, flash_attn_3 3.0.0 (hopper), causal_conv1d, mamba_ssm, then everything else, then
+# the delta-matching kernel package).
+dependencies = [
+    "torch>=2.12",
+    "transformers>=5.9",
+    "numpy>=2.0",
+    "einops",
+    "PyYAML",
+    "datasets>=5.0",
+    "safetensors",
+    "sentencepiece",
+    "tokenizers",
+    "huggingface_hub",
+    "wandb",
+    "portalocker",
+    "tqdm",
+    "psutil",
+    "ninja",
+    "packaging",
+]
+
+[project.optional-dependencies]
+# the mixers, fused ops and fp8 training (all pinned in the lock file; several are built from source, see docs/SETUP.md).
+# The fp8 attention kernel itself is the separate `delta-matching` package (the delta-matching repository, installed from
+# its checkout: the two submodule inits of docs/SETUP.md section 3, then `MAX_JOBS=8 pip install --no-build-isolation .`).
+# It is not on PyPI, so it is not declared here.
+kernels = [
+    "flash-linear-attention==0.5.2", "fla-core==0.5.2", "causal_conv1d", "mamba_ssm",
+    "tilelang==0.1.8",          # fla's GDN backward on Hopper refuses Triton >= 3.4 without its TileLang backend
+    "liger_kernel==0.8.0", "torchao==0.17.0",
+    "flash-attn",               # FA2: flash_attn_func / flash_attn_with_kvcache (source build: CUDA ext)
+]
+eval = ["lm_eval==0.4.12", "nltk"]                 # the lm-eval harness + RULER path (memmap_ppl needs neither)
+analysis = ["pandas", "matplotlib", "scipy"]
+test = ["pytest"]
+
+# Top-level packages live under src/ (import as `pretrain`, `evaluation`, `inference`, `modeling`, `utils`, `kernel`
+# with PYTHONPATH=src, which scripts/campaign/env.sh sets).
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["pretrain*", "evaluation*", "inference*", "modeling*", "utils*", "kernel*"]
+
+# Data files next to the code: RULER's task table (read via __file__), the evaluation configs (meta_eval's default
+# --eval_config), the extra lm-eval task definitions with their data, and the training configs.
+[tool.setuptools.package-data]
+evaluation = ["configs/*.yaml", "lm_eval_tasks/*.yaml", "lm_eval_tasks/*.py", "lm_eval_tasks/data/*"]
+"evaluation.ruler" = ["config_tasks.yaml"]
+pretrain = ["configs/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "gpu: needs a CUDA GPU (Hopper for the fp8 kernels)",
+    "slow: launches training or evaluation subprocesses (minutes)",
+    "data: needs the data root (DM_DATA_ROOT, else workspace/data; data/README.md)",
+]
+
+
+# ---------------------------------------------------------------------------
+# uv build configuration -- the `uv sync` path (scripts/build_kernels.sh).
+#
+# NOTE: two environment recipes exist and target different torch versions. docs/SETUP.md +
+# env/requirements-cu130-hopper.lock.txt are the certified environment of the study (torch 2.12.0+cu130,
+# flash_attn 2.8.3.post1, mamba_ssm 2.3.2.post1): that is what the recorded results were produced with.
+# The config below instead resolves a fresh `uv sync`/`uv.lock` env at a newer torch. Use docs/SETUP.md to
+# reproduce the study; use scripts/build_kernels.sh for a development env.
+#
+# flash-attn / mamba_ssm / causal_conv1d compile CUDA extensions and need to
+# `import torch` inside their build, so they cannot use build isolation.
+# ---------------------------------------------------------------------------
+# NOT declared as dependencies (installed by scripts/build_kernels.sh instead):
+#
+#   flash_attn_3        -- FA3/hopper, the bf16 baseline of the head_dim-256 arms. Lives in the
+#                          `hopper/` subdir of the flash-attention repo, built sm90a-only.
+#   transformer_engine  -- for `attn_impl: te_fp8`. Its build needs CPLUS_INCLUDE_PATH
+#                          pointed at the pip nvidia-cudnn-cu13 headers, which is a
+#                          venv-absolute path and so cannot be expressed here; declaring
+#                          it would give a `uv sync` that always fails.
+#   delta-matching      -- the fp8 attention kernel package, built from its own repository.
+#
+# All of these are guarded/lazy imports; the bf16 training and the eval paths do not need them.
+# ---------------------------------------------------------------------------
+[tool.uv.sources]
+# FA2 built from a pinned flash-attention commit. The certified lock uses PyPI flash-attn 2.8.3.post1 against
+# torch 2.12 instead -- drop this block to resolve from PyPI.
+flash-attn = { git = "https://github.com/Dao-AILab/flash-attention.git", rev = "1bda8f9290cd48d030f1516f0e680cd464ef3554" }
+
+[tool.uv]
+# flash-attn / mamba-ssm / causal-conv1d compile CUDA extensions and `import torch`
+# inside their setup.py, so they must build against the *installed* torch rather
+# than an isolated build env. That makes installation two-phase (torch first, then
+# these) -- `scripts/build_kernels.sh` does it in the right order.
+no-build-isolation-package = ["flash-attn", "mamba-ssm", "causal-conv1d"]
+
+[tool.uv.extra-build-variables]
+# FLASH_ATTN_CUDA_ARCHS=90 restricts codegen to Hopper; the default
+# "80;90;100;110;120" multiplies build time ~5x for archs we do not run on.
+flash-attn    = { FLASH_ATTENTION_FORCE_BUILD = "TRUE", FLASH_ATTN_CUDA_ARCHS = "90", MAX_JOBS = "64", NVCC_THREADS = "4" }
+mamba-ssm     = { MAMBA_FORCE_BUILD = "TRUE", MAX_JOBS = "64", NVCC_THREADS = "4" }
+causal-conv1d = { CAUSAL_CONV1D_FORCE_BUILD = "TRUE", MAX_JOBS = "64", NVCC_THREADS = "4" }

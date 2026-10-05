@@ -1,0 +1,9 @@
+delta-matching-train
+Copyright 2026 the delta-matching-train authors
+
+This product is licensed under the Apache License, Version 2.0 (LICENSE).
+
+It includes files adapted from other projects that keep their own copyright notices and licenses (Apache-2.0, MIT,
+BSD-2-Clause): the NVIDIA training and evaluation framework (jetlm) and RULER (Copyright (c) 2024, NVIDIA CORPORATION),
+Hugging Face transformers, mamba_ssm, zoology, flash-linear-attention, lm-evaluation-harness, LiveCodeBench, human-eval
+and Liger-Kernel. THIRD_PARTY_NOTICES.md lists the files, their copyright lines and the license texts.

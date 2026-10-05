@@ -1,0 +1,33 @@
+task: aime2025_reasoning
+# Local 30-problem AIME-2025 set (from NeMo-Skills dataset/aime25; source and license in data/README.md).
+# data_files is resolved against the working directory: run from the repository root (as the launchers and tests do).
+dataset_path: json
+dataset_kwargs:
+  data_files:
+    test: src/evaluation/lm_eval_tasks/data/aime2025.jsonl
+output_type: generate_until
+test_split: test
+doc_to_text: !function aime2025_reasoning_utils.doc_to_text
+doc_to_target: expected_answer
+process_results: !function aime2025_reasoning_utils.process_results
+num_fewshot: 0
+generation_kwargs:
+  until:
+    - "<|im_end|>"
+  do_sample: true
+  temperature: 0.99999
+  top_p: 0.99999
+  top_k: 0
+  max_gen_toks: 32768
+repeats: 16
+filter_list:
+  - name: all
+    filter:
+      - function: custom
+        filter_fn: !function aime2025_reasoning_utils.keep_all
+metric_list:
+  - metric: exact_match
+    aggregation: mean
+    higher_is_better: true
+metadata:
+  version: 1.0

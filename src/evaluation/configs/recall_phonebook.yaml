@@ -1,0 +1,13 @@
+name: recall_phonebook
+type: recall
+mode: phonebook             # single-query lookup: a phonebook of key->value, recall ONE queried key
+# num_kv_pairs here = number of phonebook entries; one query per example. A cell needs 2 * entries + 2 <= seq_len
+# (other cells are skipped), so 4096 entries is the largest that runs on these seq_lens.
+num_kv_pairs: [64, 128, 256, 512, 1024, 2048, 4096]
+seq_lens: [2048, 4096, 8192, 16384]
+num_examples: 256
+vocab_size: 32000
+random_non_queries: true
+seed: 11785
+# examples per forward pass on each rank; takes precedence over meta_eval's --eval_batch_size.
+batch_size: 8

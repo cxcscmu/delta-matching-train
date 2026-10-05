@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+uv.lock
+
+# environments (docs/SETUP.md section 2, scripts/build_kernels.sh: .venv)
+.venv*/
+
+# run outputs: the default workspace, the trainer's default checkpoint / log roots, wandb, local checkouts
+/workspace
+/logs
+runs/
+wandb/
+third_party/

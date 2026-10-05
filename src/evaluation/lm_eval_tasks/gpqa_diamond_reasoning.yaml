@@ -1,0 +1,36 @@
+task: gpqa_diamond_reasoning
+dataset_path: Idavidrein/gpqa
+dataset_name: gpqa_diamond
+output_type: generate_until
+# HF only ships a train split; use it as the eval set (NeMo EVAL_SPLIT=diamond, 198 Q).
+training_split: train
+validation_split: train
+test_split: null
+process_docs: !function gpqa_reasoning_utils.process_docs
+doc_to_text: !function gpqa_reasoning_utils.doc_to_text
+doc_to_target: answer
+process_results: !function gpqa_reasoning_utils.process_results
+num_fewshot: 0
+generation_kwargs:
+  # Reasoning: thinking ON, near-1.0 sampling (NeMo uses 0.99999 to avoid exact-1 edge
+  # cases), no top_k cap, big budget so the <think> block can close. Only the chat
+  # terminator stops generation (NO "\n\n": that would truncate the reasoning trace).
+  until:
+    - "<|im_end|>"
+  do_sample: true
+  temperature: 0.99999
+  top_p: 0.99999
+  top_k: 0
+  max_gen_toks: 32768
+repeats: 8
+filter_list:
+  - name: all
+    filter:
+      - function: custom
+        filter_fn: !function gpqa_reasoning_utils.keep_all
+metric_list:
+  - metric: exact_match
+    aggregation: mean
+    higher_is_better: true
+metadata:
+  version: 1.0

@@ -1,0 +1,35 @@
+name: ruler_llama2_64k
+type: ruler
+# RULER-500 (Llama-2 32k tokenizer, tturing/ruler-500-llama2) for the stage-2 (context extension) YaRN-extended
+# 64k dmlm models. Same as ruler_llama2.yaml but ADDS the 65536 bucket: the trained 64k context (4k = short anchor;
+# 16k/32k/64k = the YaRN long-context test). Run with EVAL_ENGINE=mini_eval_dev (the inference engine, which applies
+# the YaRN mscale² attention factor like the model); HF .forward is intractable at 64k (O(L²) recompute).
+# Layout <length>/data/<task>/validation.jsonl; records carry answer_prefix (binary-search format).
+# `name` is ruler_llama2_64k in both ruler_llama2_64k.yaml and ruler_llama2_64k_smoke.yaml on purpose:
+# scripts/campaign/eval_arm_64k.sh (S2_RULER_CFG) copies either file to <out>/ruler_llama2_64k.yaml and checks
+# <out>/ruler_llama2_64k/ruler_llama2_64k_results.complete. Run directly, both write into
+# <output_dir>/ruler_llama2_64k/, each under its own config file name (its results JSON and its predictions).
+data_dir: workspace/data/ruler-500-llama2
+lengths: [8192, 65536]
+max_samples: 16      # SMOKE copy of ruler_llama2_64k.yaml: two lengths, 16 examples per task
+verbose: true
+tasks:
+  - {name: niah_single_1,   subset: validation}
+  - {name: niah_single_2,   subset: validation}
+  - {name: niah_single_3,   subset: validation}
+  - {name: niah_multikey_1, subset: validation}
+  - {name: niah_multikey_2, subset: validation}
+  - {name: niah_multikey_3, subset: validation}
+  - {name: niah_multivalue, subset: validation}
+  - {name: niah_multiquery, subset: validation}
+  - {name: vt,              subset: validation}
+  - {name: cwe,             subset: validation}
+  - {name: fwe,             subset: validation}
+  - {name: qa_1,            subset: validation}
+  - {name: qa_2,            subset: validation}
+generation_config:
+  do_sample: false
+  temperature: 0
+  top_k: 32
+  top_p: 1.0
+  stop: ""

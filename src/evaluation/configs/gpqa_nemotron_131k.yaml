@@ -1,0 +1,15 @@
+name: gpqa_131k
+type: lm_eval_harness
+# 131072-budget GPQA-diamond (the budget of NVIDIA's recipe, for comparison with the model card). The
+# continuous-batching engine (EVAL_ENGINE=mini_eval_dev) makes this budget tractable; the HF path does not.
+apply_chat_template: true
+enable_thinking: true
+strip_reasoning: true
+max_length: 132096
+max_new_tokens: 131072
+include_path: src/evaluation/lm_eval_tasks
+keys_to_remove_in_save: ["doc", "target"]
+tasks:
+  - name: gpqa_diamond_reasoning_131k
+    metric: exact_match,all
+    display_name: gpqa_diamond_131k

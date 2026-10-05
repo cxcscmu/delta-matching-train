@@ -1,0 +1,10 @@
+# Two of the nine commonsense tasks (both cached in hf_cache), for the eval smoke test. The protocol config is
+# src/evaluation/configs/commonsense.yaml.
+name: commonsense_tiny
+type: lm_eval_harness
+max_length: 2048
+tasks:
+  - name: copa
+    metric: acc,none
+  - name: piqa
+    metric: acc_norm,none

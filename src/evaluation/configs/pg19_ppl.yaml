@@ -1,0 +1,24 @@
+# PG19 long-context perplexity curve. Not a meta_eval config: run it with
+#   torchrun --nproc_per_node=<gpus> -m evaluation.ppl.pg19_ppl --model_name_or_path <ckpt> \
+#       --eval_config src/evaluation/configs/pg19_ppl.yaml
+# (from the repository root, PYTHONPATH=src). --l_max, --stride, --num_books and --batch_size override the values below.
+name: pg19_ppl
+type: pg19_ppl
+# split:
+#   auto                      -> curated if processed_data/PG-19-curated/books.jsonl exists, else test
+#   curated                   -> that local book list (not shipped with this repository; its format is documented in
+#                                src/evaluation/ppl/pg19_dataset.py)
+#   test / validation / train -> the HF dataset emozilla/pg19 (this split, its first num_books books)
+split: auto
+num_books: 100
+# stride = step size of the anchored growing window. The curve has l_max/stride points.
+# 1024 gives 128 points (32k=k=32, 64k=k=64, 96k=k=96, 128k=k=128).
+stride: 1024
+l_max: 131072
+# batch_size = books per forward pass on each rank (data-parallel within rank).
+# For B200 (192 GB HBM3e): 4 fits at 8B + l_max=131072 with ~62 GB peak.
+# For H100 (80 GB): use 1 (or 2 for 1.7B).
+batch_size: 4
+# CSV target columns + the named checkpoints copied to wandb.summary (`ppl_at_<L>`).
+target_lengths_for_csv: [32768, 65536, 98304, 131072]
+wandb_checkpoint_lengths: [32768, 65536, 98304, 131072]

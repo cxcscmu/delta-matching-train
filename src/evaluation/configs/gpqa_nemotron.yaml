@@ -1,0 +1,18 @@
+name: gpqa
+type: lm_eval_harness
+# Reasoning eval for the Nemotron instruct model: thinking ON, score the text after the
+# last </think>. GPQA-diamond, NeMo aai mcq-4choices recipe, 8 repeats (pass@1[avg-of-8]).
+apply_chat_template: true
+enable_thinking: true
+strip_reasoning: true
+# Budget: think trace + answer share max_new_tokens; max_length must exceed it + the prompt.
+max_length: 40960
+max_new_tokens: 32768
+# Directory of custom lm_eval task YAMLs (resolved via TaskManager against the working directory: run from the
+# repository root, as the launchers and tests do).
+include_path: src/evaluation/lm_eval_tasks
+keys_to_remove_in_save: ["doc", "target"]
+tasks:
+  - name: gpqa_diamond_reasoning
+    metric: exact_match,all
+    display_name: gpqa_diamond

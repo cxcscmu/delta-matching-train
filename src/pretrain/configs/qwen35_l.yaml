@@ -1,0 +1,83 @@
+# QWEN3.5 SCALE LADDER, LARGE cell: 5.289 B (3.18x the 1.665 B base). 2026-08-18.
+#
+# DERIVED FROM qwen35_m.yaml; qwen35_xs.yaml is the small cell of the same ladder. This cell:
+#   d_model 3072, 32 layers (24 GDN + 8 attn)
+#   attention 16 q / 4 kv at head_dim 256 (GQA group 4). q_dim = 16*256 = 4096 > d_model: the
+#     price of holding head_dim 256, which is the ladder's one hard kernel invariant (see below).
+#   GDN 16 QK / 32 V heads (gdn_num_v_heads, added 2026-08-18): fla's expand_v=2 makes each V head
+#     256 wide, so value_dim = 32*256 = 8192 = 2.67*d_model vs the base's 2.00, while key_dim =
+#     16*128 = 2048 = 0.67*d_model. V capacity deliberately grows super-proportionally at the top
+#     of the ladder; the small cell keeps the base's QK=V shape.
+#
+# head_dim 256: the fp8 attention kernel's block-scale contract is [128, 64] below 256 and with it
+# the fp8 quantization block granularity; a 192-wide head here would confound scale with kernel
+# numerics.
+#
+# BUDGET IS THE BASE'S, UNCHANGED: GBS 128 x 28610 steps = 30.0 B tokens (single epoch, matched
+# optimizer steps). 5.7 tok/param = 0.28x Chinchilla: deliberately UNDER-trained. Absolute eval
+# scores are not quality numbers; the cell exists to test whether stale delta TURNS, and the
+# horizon clears the 1.665 B onset (8690-11180 steps, 11.7 B tokens) on both axes at peak LR.
+#
+# LR 2.4e-3 is NOT validated at this width (swept at 233 M, transferred once across a 2x step).
+# Run a short LR probe BEFORE the full grid: a too-high LR here produces divergence that has
+# nothing to do with delta staleness.
+run_name: qwen35_l
+backend: fsdp2
+
+global_batch_size: 128
+per_device_batch_size: 1        # 5.3B at 8k -> ga 16 (GBS 128 exact)
+num_steps: 28610                # SAME horizon as qwen35_m.yaml => same 30B-token budget
+hf_export_steps: []
+
+gradient_checkpointing: true
+ac_mode: selective
+fused_ce: true
+compile: false
+fp8: false
+bf16: true
+
+save_interval: 1192
+save_total_limit: null
+seed: 11785
+hf_save_dir:   workspace/hf/qwen35_l
+ckpt_root_dir: workspace/ckpts
+log_root_dir:  workspace/logs
+
+model:
+  vocab_size: 32000             # DEVIATION from Qwen's 248320: see header
+  d_model: 3072
+  n_layers: 32
+  n_heads: 16
+  n_kv_heads: 4
+  head_dim: 256
+  max_seq_len: 8192
+  layer_mixers: [gated_deltanet, gated_deltanet, gated_deltanet, gqa]
+  intermediate_size: 9216   # 3*d_model, ratio held
+  gdn_head_dim: 128             # linear_key_head_dim / linear_value_head_dim
+  gdn_num_heads: 16             # QK heads; key_dim 2048 = 0.67*d
+  gdn_num_v_heads: 32           # V heads; value_dim 8192 = 2.67*d (expand_v=2 -> head_v_dim 256)
+  attn_output_gate: true
+  partial_rotary_factor: 0.25
+  qk_norm: true
+  attn_impl: sdpa
+  rope_theta: 10000000
+  norm_eps: 1.0e-6
+  tie_embeddings: true
+  z_loss_weight: 1.0e-4
+
+optim:
+  lr: 2.4e-3                     # the base cell's rate (qwen35_m.yaml); see the LR note above
+  betas: [0.9, 0.95]
+  weight_decay: 0.1
+  max_grad_norm: 1.0
+  lr_scheduler_type: wsd
+  warmup_ratio: 0.0333
+  decay_ratio: 0.2
+  decay_type: linear
+
+data:
+  paths:       workspace/data/nemotron_cc_v2d1_hq_dqa/nemotron_rs_train.bin
+  doc_lengths: workspace/data/nemotron_cc_v2d1_hq_dqa/nemotron_rs_train.doc_lengths.npy
+  dtype: uint16
+  position_mode: packed
+  seed: 11785

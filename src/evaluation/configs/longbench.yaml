@@ -1,0 +1,23 @@
+name: longbench
+type: lm_eval_harness
+# LongBench (lm_eval's `longbench` group: 21 tasks in six categories), scored with each task's LongBench metric; the
+# config reports the group score and the six category scores (lm_eval group names). Those metrics import jieba,
+# fuzzywuzzy and rouge, which the `eval` extra does not install: `pip install jieba fuzzywuzzy rouge` first.
+max_length: 262144
+max_new_tokens: 512
+tasks: 
+  - name: longbench
+    metric: score,none
+subtasks:
+  - name: longbench_code
+    metric: score,none
+  - name: longbench_fewshot
+    metric: score,none
+  - name: longbench_summarization
+    metric: score,none
+  - name: longbench_single
+    metric: score,none
+  - name: longbench_multi
+    metric: score,none
+  - name: longbench_synthetic
+    metric: score,none

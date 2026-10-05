@@ -1,0 +1,36 @@
+task: livecodebench_reasoning
+dataset_path: livecodebench/code_generation_lite
+dataset_name: release_v5
+dataset_kwargs:
+  # refs/pr/7 stores the test cases as strings (datasets>=4 compatible). A PR ref can move; for a fixed problem set
+  # pin the commit it points to (huggingface_hub.HfApi().list_repo_refs("livecodebench/code_generation_lite",
+  # repo_type="dataset", include_pull_requests=True)).
+  revision: "refs/pr/7"
+test_split: test
+unsafe_code: true                 # executes model-generated code: runs only with DM_ALLOW_CODE_EVAL=1 (meta_eval)
+output_type: generate_until       # explicit (was relying on lm_eval's default; matches the 131k task)
+process_docs: !function livecodebench_reasoning_utils.process_docs   # contests 2024-07..2024-12
+doc_to_text: !function livecodebench_reasoning_utils.doc_to_text
+doc_to_target: question_id
+process_results: !function livecodebench_reasoning_utils.process_results
+num_fewshot: 0
+generation_kwargs:
+  until:
+    - "<|im_end|>"
+  do_sample: true
+  temperature: 0.99999
+  top_p: 0.99999
+  top_k: 0
+  max_gen_toks: 32768
+repeats: 8
+filter_list:
+  - name: all
+    filter:
+      - function: custom
+        filter_fn: !function livecodebench_reasoning_utils.keep_all
+metric_list:
+  - metric: pass_at_1
+    aggregation: mean
+    higher_is_better: true
+metadata:
+  version: 1.0

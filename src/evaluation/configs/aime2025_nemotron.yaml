@@ -1,0 +1,16 @@
+name: aime2025
+type: lm_eval_harness
+# Reasoning eval for the Nemotron instruct model: thinking ON, score the text after the
+# last </think>. AIME-2025 (30 problems), NeMo math recipe, 16 repeats (pass@1[avg-of-16];
+# NVIDIA uses 64: raise the task's `repeats` for the fully-comparable number).
+apply_chat_template: true
+enable_thinking: true
+strip_reasoning: true
+max_length: 40960
+max_new_tokens: 32768
+include_path: src/evaluation/lm_eval_tasks
+keys_to_remove_in_save: ["doc", "target"]
+tasks:
+  - name: aime2025_reasoning
+    metric: exact_match,all
+    display_name: aime2025

@@ -1,0 +1,31 @@
+name: ruler_llama2
+type: ruler
+# RULER-500 regenerated with the Llama-2 32k tokenizer (tturing/ruler-500-llama2): exact context
+# lengths for our Llama-2-vocab dmlm models. Layout <length>/data/<task>/validation.jsonl; records
+# carry `answer_prefix` (binary-search format) → ruler.py feeds input + answer_prefix.
+data_dir: workspace/data/ruler-500-llama2
+# Trained length 8k + extrapolation to 16K/32K (4k = short anchor). The dataset also has 2048 / 65536 / 98304 /
+# 131072; the long ones are slow under the cache-free HF .generate (O(L²) recompute), so use the engine
+# (EVAL_ENGINE=mini_eval_dev) to add them. (2048/qa_2 has 90/500 over-budget samples; see the dataset README.)
+lengths: [4096, 8192, 16384, 32768]
+verbose: true
+tasks:
+  - {name: niah_single_1,   subset: validation}
+  - {name: niah_single_2,   subset: validation}
+  - {name: niah_single_3,   subset: validation}
+  - {name: niah_multikey_1, subset: validation}
+  - {name: niah_multikey_2, subset: validation}
+  - {name: niah_multikey_3, subset: validation}
+  - {name: niah_multivalue, subset: validation}
+  - {name: niah_multiquery, subset: validation}
+  - {name: vt,              subset: validation}
+  - {name: cwe,             subset: validation}
+  - {name: fwe,             subset: validation}
+  - {name: qa_1,            subset: validation}
+  - {name: qa_2,            subset: validation}
+generation_config:
+  do_sample: false
+  temperature: 0
+  top_k: 32
+  top_p: 1.0
+  stop: ""

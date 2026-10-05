@@ -1,0 +1,14 @@
+name: cruxeval
+type: lm_eval_harness
+# CRUXEval input / output prediction with chain of thought (lm_eval's cruxeval_*_cot tasks, 10 samples per problem).
+# Scoring EXECUTES the model's answers as Python (the tasks are marked unsafe_code): it needs the explicit opt-in
+# DM_ALLOW_CODE_EVAL=1; isolated machine only. The metric keys are those of lm_eval 0.4.12: pass@k under the
+# `create_test` filter; the output task computes only pass@1, so pass@1 is the reported metric of both.
+max_length: 4096
+max_new_tokens: 2048
+tasks:
+  - name: cruxeval_input_cot
+    metric: pass@1,create_test
+    secondary_metrics: ["pass@5,create_test"]
+  - name: cruxeval_output_cot
+    metric: pass@1,create_test

@@ -1,0 +1,19 @@
+name: livecodebench
+type: lm_eval_harness
+# Reasoning code eval for the Nemotron instruct model: thinking ON, score the code after
+# the last </think>, EXECUTE it against the LiveCodeBench tests. Split test_v5_2407_2412
+# (release_v5, 2024-07..2024-12, 315 problems), 8 repeats (pass@1[avg-of-8]). Executing model-generated code
+# needs the explicit opt-in DM_ALLOW_CODE_EVAL=1 (see lm_eval_tasks/livecodebench_reasoning_utils.py); isolated
+# machine only.
+apply_chat_template: true
+enable_thinking: true
+strip_reasoning: true
+max_length: 40960
+max_new_tokens: 32768
+include_path: src/evaluation/lm_eval_tasks
+system_instruction: "You are a helpful and harmless assistant. You should think step-by-step."
+keys_to_remove_in_save: ["doc", "target"]
+tasks:
+  - name: livecodebench_reasoning
+    metric: pass_at_1,all
+    display_name: livecodebench

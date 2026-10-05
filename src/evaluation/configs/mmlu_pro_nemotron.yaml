@@ -1,0 +1,16 @@
+name: mmlu_pro_nemotron
+type: lm_eval_harness
+# Reasoning MMLU-Pro for the Nemotron instruct model: thinking ON, score the text after the
+# last </think>, 10-choice boxed extraction. Single-shot (repeats=1). (Named mmlu_pro_nemotron, not mmlu_pro:
+# mmlu_pro.yaml has that name, and configs with one name share the results directory <output_dir>/<name>/.)
+apply_chat_template: true
+enable_thinking: true
+strip_reasoning: true
+max_length: 40960
+max_new_tokens: 32768
+include_path: src/evaluation/lm_eval_tasks
+keys_to_remove_in_save: ["doc", "target"]
+tasks:
+  - name: mmlu_pro_reasoning
+    metric: exact_match,all
+    display_name: mmlu_pro

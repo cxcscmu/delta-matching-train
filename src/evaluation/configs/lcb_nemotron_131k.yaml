@@ -1,0 +1,28 @@
+name: livecodebench_131k
+type: lm_eval_harness
+# 131072-budget LiveCodeBench (for comparison with the model card's LiveCodeBench v6 row). Thinking ON, score
+# the code after the last </think>, then EXECUTE it against the LCB public+private tests: this needs the explicit
+# opt-in DM_ALLOW_CODE_EVAL=1 (see lm_eval_tasks/livecodebench_reasoning_utils.py); isolated machine only. The
+# continuous-batching engine makes the 131072 budget tractable (the HF path does not); the OFFICIAL NVIDIA recipe
+# budget for ns_livecodebench is 131072 (the recipe global), NOT the 32k of lcb_nemotron.yaml.
+#
+# Split = LiveCodeBench v6, contests 2024-08..2025-05 (454 problems): dataset_name release_v6 and the default
+# window of process_docs_v6, both in lm_eval_tasks/livecodebench_reasoning_131k.yaml. LCB_START_DATE /
+# LCB_END_DATE (YYYY-MM) override the window. (lcb_nemotron.yaml runs the older release_v5 2024-07..2024-12
+# split, 315 problems.)
+apply_chat_template: true
+enable_thinking: true
+strip_reasoning: true
+max_length: 139264          # 131072 + 8192 prompt headroom (LCB statements are much longer than
+                            # GPQA/AIME's ~1k; 8192 avoids LEFT-truncating any problem, matching the
+                            # 32k dev config's 40960 = 32768 + 8192 headroom).
+max_new_tokens: 131072
+include_path: src/evaluation/lm_eval_tasks
+# LCB is the ONE reasoning eval that carries a system prompt (the NVIDIA default_reasoning template);
+# GPQA/AIME set none. Byte-exact match to nemo_skills .../eval/livecodebench/default_reasoning.yaml.
+system_instruction: "You are a helpful and harmless assistant. You should think step-by-step."
+keys_to_remove_in_save: ["doc", "target"]   # the decoded _input_output test blobs live under doc
+tasks:
+  - name: livecodebench_reasoning_131k
+    metric: pass_at_1,all
+    display_name: livecodebench_131k

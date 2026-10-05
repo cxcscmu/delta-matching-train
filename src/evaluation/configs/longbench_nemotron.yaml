@@ -1,0 +1,27 @@
+name: longbench_nemotron
+type: lm_eval_harness
+# LongBench for the Nemotron INSTRUCT model: chat template ON, thinking OFF (short extractive
+# answers, like RULER: 512-token budget is too small for a think block to close). Context
+# capped at 131072 (the engine's single-GPU prefill limit; longer samples are left-truncated).
+# Same tasks and scores as longbench.yaml, whose notes apply (install jieba, fuzzywuzzy and rouge first). Named
+# longbench_nemotron, not longbench: configs with one name share the results directory <output_dir>/<name>/.
+apply_chat_template: true
+enable_thinking: false
+max_length: 131072
+max_new_tokens: 512
+tasks:
+  - name: longbench
+    metric: score,none
+subtasks:
+  - name: longbench_code
+    metric: score,none
+  - name: longbench_fewshot
+    metric: score,none
+  - name: longbench_summarization
+    metric: score,none
+  - name: longbench_single
+    metric: score,none
+  - name: longbench_multi
+    metric: score,none
+  - name: longbench_synthetic
+    metric: score,none

@@ -1,0 +1,53 @@
+# A 4-layer, d256 twin of src/pretrain/configs/qwen35_m.yaml for the smoke tests (tests/): the same mixer pattern
+# (3 GatedDeltaNet : 1 attention), qk-norm, output gate, partial rotary 0.25, head_dim 128 (the Delta-Matching-128 kernel),
+# the same optimizer family and data format. Run and eval paths are supplied by the tests on the command line.
+run_name: tiny_hybrid
+backend: fsdp2
+global_batch_size: 4
+per_device_batch_size: 1
+num_steps: 3
+hf_export_steps: []
+gradient_checkpointing: false
+ac_mode: selective
+fused_ce: true
+compile: false
+fp8: false
+bf16: true
+save_interval: 1000000
+save_total_limit: 1
+seed: 11785
+model:
+  vocab_size: 32000
+  d_model: 256
+  n_layers: 4
+  n_heads: 4
+  n_kv_heads: 1
+  head_dim: 128
+  max_seq_len: 2048
+  layer_mixers: [gated_deltanet, gated_deltanet, gated_deltanet, gqa]
+  intermediate_size: 512
+  gdn_head_dim: 64
+  gdn_num_heads: 4
+  attn_output_gate: true
+  partial_rotary_factor: 0.25
+  qk_norm: true
+  attn_impl: sdpa
+  rope_theta: 10000000
+  norm_eps: 1.0e-6
+  tie_embeddings: true
+  z_loss_weight: 1.0e-4
+optim:
+  lr: 1.0e-3
+  betas: [0.9, 0.95]
+  weight_decay: 0.1
+  max_grad_norm: 1.0
+  lr_scheduler_type: wsd
+  warmup_ratio: 0.34
+  decay_ratio: 0.2
+  decay_type: linear
+data:
+  paths: SET_BY_THE_TEST
+  doc_lengths: SET_BY_THE_TEST
+  dtype: uint16
+  position_mode: packed
+  seed: 11785

@@ -1,0 +1,76 @@
+# QWEN3.5 SCALE LADDER, SMALL cell: 0.569 B (0.34x the 1.665 B base). 2026-08-18.
+#
+# DERIVED FROM qwen35_m.yaml. The ladder scales the model the way a family actually scales (width,
+# depth, attention heads and GDN capacity together) rather than locking every ratio to d_model.
+# This cell:
+#   d_model 1280, 20 layers (15 GDN + 5 attn; 20 % 4 == 0 so the 3:1 pattern tiles exactly)
+#   attention 6 q / 2 kv at head_dim 256 (GQA group 3 vs the base's 4: at d1280 no integer head
+#     count gives both group 4 and a sane q_dim; q_dim = 6*256 = 1536)
+#   GDN 10 QK / 10 V heads: the SAME QK=V shape as the base; key_dim = 1.00*d, value_dim = 2.00*d.
+#     Only the LARGE cell widens V (see qwen35_l.yaml).
+#
+# head_dim 256 is the ladder's one hard invariant: the fp8 attention kernel's block-scale contract switches to
+# [128, 64] tiles below 256 and with them the fp8 quantization block granularity, so a narrower
+# head would confound scale with kernel numerics.
+#
+# BUDGET IS THE BASE'S, UNCHANGED: GBS 128 x 28610 steps = 30.0 B tokens (single epoch, matched
+# optimizer steps). 52.7 tok/param = 2.6x Chinchilla: over-trained, expected, harmless.
+run_name: qwen35_xs
+backend: fsdp2
+
+global_batch_size: 128
+per_device_batch_size: 4        # 0.57B at 8k -> ga 4 (GBS 128 exact)
+num_steps: 28610                # SAME horizon as qwen35_m.yaml => same 30B-token budget
+hf_export_steps: []
+
+gradient_checkpointing: true
+ac_mode: selective
+fused_ce: true
+compile: false
+fp8: false
+bf16: true
+
+save_interval: 1192
+save_total_limit: null
+seed: 11785
+hf_save_dir:   workspace/hf/qwen35_xs
+ckpt_root_dir: workspace/ckpts
+log_root_dir:  workspace/logs
+
+model:
+  vocab_size: 32000             # DEVIATION from Qwen's 248320: see header
+  d_model: 1280
+  n_layers: 20
+  n_heads: 6
+  n_kv_heads: 2
+  head_dim: 256
+  max_seq_len: 8192
+  layer_mixers: [gated_deltanet, gated_deltanet, gated_deltanet, gqa]
+  intermediate_size: 3840   # 3*d_model, ratio held
+  gdn_head_dim: 128             # linear_key_head_dim / linear_value_head_dim
+  gdn_num_heads: 10             # QK = V = 10: key_dim 1280 = d, value_dim 2560 = 2d (base shape)
+  attn_output_gate: true
+  partial_rotary_factor: 0.25
+  qk_norm: true
+  attn_impl: sdpa
+  rope_theta: 10000000
+  norm_eps: 1.0e-6
+  tie_embeddings: true
+  z_loss_weight: 1.0e-4
+
+optim:
+  lr: 2.4e-3                     # the base cell's rate (qwen35_m.yaml)
+  betas: [0.9, 0.95]
+  weight_decay: 0.1
+  max_grad_norm: 1.0
+  lr_scheduler_type: wsd
+  warmup_ratio: 0.0333
+  decay_ratio: 0.2
+  decay_type: linear
+
+data:
+  paths:       workspace/data/nemotron_cc_v2d1_hq_dqa/nemotron_rs_train.bin
+  doc_lengths: workspace/data/nemotron_cc_v2d1_hq_dqa/nemotron_rs_train.doc_lengths.npy
+  dtype: uint16
+  position_mode: packed
+  seed: 11785

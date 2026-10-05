@@ -1,0 +1,10 @@
+# TriviaQA 5-shot on a handful of questions (the eval smoke test caps it with --max_test_num); the protocol config is
+# src/evaluation/configs/triviaqa.yaml.
+name: triviaqa_tiny
+type: lm_eval_harness
+max_length: 2048
+max_new_tokens: 16
+num_fewshot: 5
+tasks:
+  - name: triviaqa
+    metric: exact_match,remove_whitespace
