@@ -1,12 +1,18 @@
 # delta-matching-train
 
-The training and evaluation code of the Delta-Matching study: fp8 attention training in which the backward's softmax
-correction term (the "delta", the row sum of dO times O) is recomputed from the backward's own fp8 P and dP instead of
+![Delta-Matching: torward full fp8 large model training](asset/delta-matching.png)
+
+This repository contains the official training and evaluation code of the Delta-Matching: fp8 attention training in which the backward's softmax correction term (the "delta", the row sum of dO times O) is recomputed from the backward's own fp8 P and dP instead of
 the forward's bf16 output, so the five backward matmuls and the two forward matmuls of attention all run in fp8 while the
 gradient stays consistent with the realized fp8 forward. The kernel itself is the separate **delta-matching** package
 (`delta_matching`, a flash-attention-style drop-in for Hopper: `https://github.com/jet-ai-projects/delta-matching`); this
 repository is the pretraining engine, the model configs, the data recipe, the experiment launchers and the evaluation
-suite that trained and scored the arms of the paper.
+suite that trained and scored the arms of the following paper.
+
+**Delta-Matching: Closing the Final Gap of Native 8-bit Training for LLMs**
+Haozhan Tang, Hao Kang, Han Cai, Song Han, Chenyan Xiong<br>
+Paper: https://arxiv.org/abs/2609.37852
+![Experiments we ran for Delta-Matching](asset/training_overview.png)
 
 ## What is here
 
@@ -125,9 +131,25 @@ the shipped route; `DM_DELTA_Q8=1` is the consistent-dO arm's switch.
 - `docs/train_engine.md` and `docs/eval_engine.md` are the engineering notes of the two engines. Their measurements come
   from the engines' development (a 360M model for the trainer, Nemotron-H for the generation engine), not from the
   study's runs.
+- The default seed 11785 is the cmu deep learning course number.
 
 ## License
 
 The code is released under the Apache License 2.0 (`LICENSE`, `NOTICE`). Some files are adapted from other projects and
 keep their own licenses (Apache-2.0, MIT, BSD-2-Clause); `THIRD_PARTY_NOTICES.md` lists them with their license texts.
 The data and models the code downloads come under their own terms (`data/README.md`).
+
+
+## Citation
+If you use this codebase, or otherwise found our work valuable, please cite:
+```
+@misc{tang2026deltamatching,
+  title         = {{Delta-Matching}: Closing the Final Gap of Native 8-bit Training for {LLMs}},
+  author        = {Haozhan Tang and Hao Kang and Han Cai and Song Han and Chenyan Xiong},
+  year          = {2026},
+  eprint        = {2609.37852},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.LG},
+  url           = {https://arxiv.org/abs/2609.37852}
+}
+```
