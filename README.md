@@ -6,7 +6,7 @@
   <a href="https://github.com/jet-ai-projects/delta-matching"><img src="https://img.shields.io/static/v1?label=GitHub&amp;message=Kernel%20Implementation&amp;color=blue&amp;logo=github" alt="Kernel implementation on GitHub"></a>
 </div>
 
-![Delta-Matching: torward full fp8 large model training](asset/delta-matching.png)
+https://github.com/user-attachments/assets/2bccf299-913d-4549-a260-5bc5dd8e0139
 
 This repository contains the official training and evaluation code of the Delta-Matching: fp8 attention training in which the backward's softmax correction term (the "delta", the row sum of dO times O) is recomputed from the backward's own fp8 P and dP instead of
 the forward's bf16 output, so the five backward matmuls and the two forward matmuls of attention all run in fp8 while the
