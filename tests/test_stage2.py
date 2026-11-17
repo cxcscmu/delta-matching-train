@@ -8,12 +8,15 @@ stage 2 adds on top of stage 1.
 3. The stage-2 launcher (dry, no GPU): it refuses to start without the warm-start export, runs only the four arms of
    the stage-2 experiment, and composes the paper's recipe exactly (28,000 steps, a 100-step re-warm and a 2,000-step
    decay after the trainer's truncation of the ratios, 8e-4, chunk_subset [0, 0.85], an export every 2,000 steps, the
-   Standard arm's stage-1 export of the same seed as the warm start).
+   Standard arm's stage-1 export of the same seed as the warm start). With the stand-ins of tests/_helpers.py: the warm
+   start must be finished (TRAIN_COMPLETE) and whole before the run's first complete checkpoint; once the run has one
+   it is no longer required, but still passed (--init_from_hf) whenever it is usable, so that a checkpoint the trainer
+   does not resume (a marker of another format version) restarts from the warm start, never from random weights.
 4. The stage-2 memory lever: the fused fp8 backward split per KV-head group or per query head is bitwise the single call."""
 import json, math, os, re, subprocess
 import pytest
 from _helpers import (REPO, NEMO, CE_RE, arm_args, dm_env, dm_route, require_kernel, base_env, memmap_ppl_env, dry_env,
-                      python, train_tiny)
+                      python, train_tiny, fake_launch_env, read_calls)
 
 YARN4 = '{"type":"yarn","factor":4.0,"original_max_position_embeddings":2048,"beta_fast":32,"beta_slow":1}'
 
@@ -193,7 +196,8 @@ def test_fp8_backward_per_head_group_is_bitwise(mode, streams, tmp_path):
     """The stage-2 memory lever: the fused fp8 backward called per KV-head group or per query head (forced by
     DM_BWD_HEAD_GROUPS) must return bitwise the gradients of the single call (heads are independent in the op).
     streams > 1 (DM_BWD_STREAMS) adds the stage-2 pipeline lever: the groups on several CUDA streams with the
-    matched delta's pass 0 per group; the gradients must still be bitwise the single call. The grouped run must
+    matched delta's pass 0 per group (at head_dim 128 the bundled kernel takes it once on all heads and slices it);
+    the gradients must still be bitwise the single call. The grouped run must
     announce the split (`BACKWARD PER HEAD GROUP`) and the single call must not, so the comparison is never vacuous."""
     require_kernel()
     code = r'''
@@ -234,3 +238,87 @@ print("saved", sys.argv[1])
     diffs = {k: (a[k].float() - b[k].float()).abs().max().item() for k in a}
     bad = {k: v for k, v in diffs.items() if v != 0.0}
     assert not bad, f"per-{mode} backward is not bitwise the single call: max abs diffs {bad}"
+
+
+# ------------------------------------------------------------------ the warm start, before and after the first checkpoint
+S2RN = "Q35M_dm_matched_ffn8_qkvo8_hd128_11785_s2_64k"
+
+
+def _stage2(tmp_path, *, export=None, done=False, ckpt=None, **extra):
+    """stage2_arm.sh dm_matched_hd128 11785 with the stand-ins: export = None (no warm-start export) | "whole" |
+    "truncated"; done = the warm start's TRAIN_COMPLETE; ckpt = a step of the stage-2 run's checkpoint dir, "<n>"
+    complete or "<n>-partial" (no .complete marker)."""
+    env = fake_launch_env(tmp_path, **extra)
+    init = tmp_path / "qwen35_m" / "hf" / "Q35M_clean_sdpa_ffn8_hd128_11785"
+    if export:
+        init.mkdir(parents=True)
+        (init / "model.safetensors").write_text("WHOLE" if export == "whole" else "TRUNC")
+        (init / "config.json").write_text('{"attn_impl": "sdpa"}')
+        if done:
+            (init / "TRAIN_COMPLETE").write_text("2026-11-08 10:00:00 steps=28610 num_steps=28610\n")
+    if ckpt:
+        step, _, partial = ckpt.partition("-")
+        d = tmp_path / "qwen35_m" / "ckpts" / S2RN / f"checkpoint-{step}"
+        d.mkdir(parents=True)
+        if not partial:
+            (d / ".complete").write_text("v1\n")
+    s2 = tmp_path / "data" / "prolong_64k_llama2"
+    s2.mkdir(parents=True)
+    for f in ("prolong64k_train.bin", "prolong64k_train.doc_lengths.npy"):
+        (s2 / f).write_bytes(b"")
+    p = subprocess.run(["bash", str(REPO / "scripts" / "campaign" / "stage2_arm.sh"), "dm_matched_hd128", "11785"],
+                       capture_output=True, text=True, env=env, timeout=120)
+    ranks = [c for c in read_calls(tmp_path) if c.startswith("rank ")]
+    return p.returncode, p.stdout + p.stderr, init, ranks
+
+
+@pytest.mark.parametrize("export,done,want", [
+    (None, False, "warm-start export missing"),
+    ("whole", False, "has no TRAIN_COMPLETE"),
+    ("truncated", True, "warm-start export incomplete"),
+])
+def test_stage2_needs_a_finished_whole_warm_start_before_its_first_checkpoint(tmp_path, export, done, want):
+    rc, out, init, ranks = _stage2(tmp_path, export=export, done=done, ckpt="300-partial")   # a partial save does not count
+    assert rc == 2 and want in out and not ranks, f"rc={rc}\n{out[-1500:]}"
+
+
+def test_stage2_first_launch_loads_the_warm_start(tmp_path):
+    rc, out, init, ranks = _stage2(tmp_path, export="whole", done=True)
+    assert rc == 0 and ranks and all(f"--init_from_hf {init} " in r for r in ranks), (ranks, out[-1500:])
+    assert re.search(r"LAUNCH \S+ .*save_interval=750 ", out), out[-1500:]   # stage 2's own default
+
+
+@pytest.mark.parametrize("dry", [False, True])
+@pytest.mark.parametrize("export,done", [(None, False), ("whole", False), ("truncated", True)])
+def test_stage2_resume_needs_no_warm_start(tmp_path, dry, export, done):
+    """The stage-2 run has a complete checkpoint and the stage-1 export is gone, unfinished or truncated: it resumes
+    without --init_from_hf, and says that it has no warm start to fall back on."""
+    rc, out, init, ranks = _stage2(tmp_path, export=export, done=done, ckpt="200", **({"S2_DRY": 1} if dry else {}))
+    assert rc == 0 and "from checkpoint-200" in out and "--init_from_hf" not in out, f"rc={rc}\n{out[-1500:]}"
+    assert f"WARN: {S2RN} resumes from checkpoint-200 without its warm start" in out, out[-1500:]
+    if dry:
+        assert "S2_DRY:" in out and not ranks, out[-1500:]
+    else:
+        assert ranks and not any("--init_from_hf" in r for r in ranks), ranks
+
+
+@pytest.mark.parametrize("dry", [False, True])
+def test_stage2_resume_still_passes_a_usable_warm_start(tmp_path, dry):
+    """A resume with the warm start finished and whole passes it too: the checkpoint's weights replace it, and should the
+    trainer not accept that checkpoint (dm_ckpt_step only sees that a marker exists), the run restarts from the warm
+    start instead of random weights."""
+    rc, out, init, ranks = _stage2(tmp_path, export="whole", done=True, ckpt="200", **({"S2_DRY": 1} if dry else {}))
+    assert rc == 0 and f"from checkpoint-200 (the warm start {init.name} is passed too" in out and "WARN" not in out, out[-1500:]
+    if dry:
+        assert f"--init_from_hf {init} " in out.split("S2_DRY:", 1)[1] and not ranks, out[-1500:]
+    else:
+        assert ranks and all(f"--init_from_hf {init} " in r for r in ranks), ranks
+
+
+def test_stage2_finished_run_needs_nothing(tmp_path):
+    """The stage-2 run's own TRAIN_COMPLETE: no warm start needed, train_arm.sh exits 0 at once."""
+    d = tmp_path / "qwen35_m" / "hf" / S2RN
+    d.mkdir(parents=True)
+    (d / "TRAIN_COMPLETE").write_text("done\n")
+    rc, out, init, ranks = _stage2(tmp_path)
+    assert rc == 0 and "already complete" in out and not ranks, f"rc={rc}\n{out[-1500:]}"

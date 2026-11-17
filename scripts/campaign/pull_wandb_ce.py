@@ -1,9 +1,13 @@
 """Recover per-step train CE for runs whose node-local logs are gone, from wandb.
 
-Two wandb facts shape this: the trainer logs metrics with
-step=global_step, so the wandb step axis IS the training step; and relaunches create NEW wandb
-runs under the SAME display name, so one training run can be several wandb runs. All matching
-runs are pulled, ordered by createdAt, and emitted as segments in that order.
+Three wandb facts shape this: the trainer logs metrics with step=global_step, so the wandb step axis IS the training
+step; a relaunch (every job of a chain) RESUMES the same wandb run (pretrain/train.py keeps its id in
+<log_root>/<run>.wandb_id), so a training run is normally ONE wandb run (one segment here); and wandb drops every step
+below the highest one it has seen, so after a crash resumed from an older checkpoint the replayed steps keep the
+abandoned segment's values in wandb (the trainer warns about it at the resume). <log_root>/<run>.metrics.jsonl keeps
+both segments (the records after the last resume event are the canonical trajectory): prefer it when it exists. Runs
+started before the id was kept, or whose id file was lost, can still be several wandb runs under the SAME display name:
+all matching runs are pulled, ordered by createdAt, and emitted as segments in that order.
 
 usage: pull_wandb_ce.py <run_display_name> <out_tsv> [<comment>]
 """

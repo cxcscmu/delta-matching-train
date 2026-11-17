@@ -32,7 +32,7 @@ def _fa2():
 check("flash-attn (FA2 CUDA ext)", _fa2)
 
 def _dm():
-    # the fp8 attention kernel of the dm mixers: the separate delta-matching package (docs/SETUP.md section 3)
+    # the fp8 attention kernel of the dm mixers: the bundled kernels/delta-matching (scripts/install_kernel.sh, docs/SETUP.md section 3)
     import delta_matching
     from delta_matching.core import _ops
     o = _ops()

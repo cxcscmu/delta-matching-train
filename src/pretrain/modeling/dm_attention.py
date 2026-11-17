@@ -5,6 +5,8 @@ delta realization:
     matched   delta from the backward's own realized fp8 P / dP     (Delta-Matching)
     bf16_dp   the stale delta with the dP = dO V^T matmul kept in bf16 (the one-matmul exemption studied as the paper's
               bf16-dP arm; head_dim 128 only; the kernel built with DM_BF16_DP=1, checked through build_bf16dp())
+    aux_out   Attn-QAT's auxiliary-output delta on these kernels (a baseline): delta = rowsum(dequant(dO8) * O') with
+              O' = bf16(P) @ V-hat saved by the forward (kernel/dm_port/aux_out.py); no pass 0
 
 Parameter-identical to GQAAttention (same submodules, same registration ORDER, so the same seed gives bit-identical
 init across arms: the Standard arm is plain `mixer: gqa`).  Only the attention call differs.
@@ -38,7 +40,7 @@ import torch.nn as nn
 from .config import ModelConfig
 from .layers import apply_output_gate, q_proj_out_features, RMSNorm, split_q_gate, yarn_mscale
 
-DM_MODES = ("stale", "matched", "bf16_dp")
+DM_MODES = ("stale", "matched", "bf16_dp", "aux_out")
 
 
 def require_delta_matching():
@@ -47,7 +49,7 @@ def require_delta_matching():
         import delta_matching
     except ImportError as e:
         raise ImportError("the dm mixer needs the Delta-Matching kernel package: install the delta-matching kernel package "
-                          "(see docs/SETUP.md section 3: git clone --recursive, then pip install --no-build-isolation .)") from e
+                          "(see docs/SETUP.md section 3: scripts/install_kernel.sh builds the bundled kernels/delta-matching)") from e
     return delta_matching
 
 

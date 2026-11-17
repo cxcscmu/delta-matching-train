@@ -9,12 +9,36 @@ Launch:
 Flow: dist_init -> seed -> data -> model -> wrap (ddp|fsdp2) -> Trainer -> train.
 Model init uses the SAME seed on every rank so the replicas/shards are identical at
 step 0.
+
+W&B is initialized only once the Trainer is built, i.e. after the resume was decided, checked (run identity, kernel
+build) and loaded: a refused resume or a failed load never touches the run's W&B id. The end, in this order
+(_close_and_exit): the process group is closed, then the master closes its W&B run, then the process exits. A slow W&B
+upload therefore holds only the master, never the other ranks in the teardown's barrier.
+
+Exit status: 0 = training complete (final checkpoint + export); 75 = stopped early (a SIGTERM / SIGUSR1, or the time
+budget DM_STOP_BEFORE): the newest complete checkpoint holds the state, relaunch to resume (also when the stop came
+before the first step, and whatever the process-group teardown or W&B do); 2 = the resume was refused for a reason no
+retry can fix (the run identity, <ckpt_dir>/run_identity.json, or the checkpoint's kernel build differs;
+DM_ALLOW_RUN_CHANGE=1 / DM_ALLOW_KERNEL_CHANGE=1 accept the change): a configuration error, which a chain of jobs does
+not retry. Every rank then prints "FATAL: RESUME REFUSED ..." (REFUSED_MARKER) on its stderr, which the master tees
+into <log_root_dir>/<run_name>.log: torchrun reports any worker failure as 1, so a launcher maps the marker back to 2
+the way it maps "Stopping early" to 75. Anything else (1, ...) = a failure.
+Env: DM_DIST_CLOSE_TIMEOUT (30 s): the bound on the process-group teardown after a stop or a refusal (a healthy one
+takes well under a second). DM_WANDB_FINISH_TIMEOUT (60 s, trainer/base_trainer.py) bounds the master's W&B finish that
+follows it. A stop costs every rank the rest of the step + the save, and the master up to DM_WANDB_FINISH_TIMEOUT more.
+After a SIGTERM that can exceed the 90 s train_arm.sh's collector grants (DM_TERM_GRACE; Slurm's KillWait is 120 s)
+on the large arms. A master killed then, in its W&B upload, has written its checkpoint already. With more than one
+rank, the others' 75 is the launch's exit status, and the W&B data stays in WANDB_DIR for `wandb sync`. The chains stop
+on their time budget (DM_STOP_BEFORE, 600 s before the job's end), not on the SIGTERM. The trainer's own knobs are in
+trainer/base_trainer.py's docstring.
 """
 from __future__ import annotations
 
 import logging
 import os
 import sys
+import threading
+import traceback
 
 import torch
 
@@ -26,6 +50,10 @@ from .data.data_loader import build_train_dataloader
 from .modeling import build_model, FLASH_AVAILABLE, resolve_attn_impl
 from .parallel.wrap import build_ddp_model, build_fsdp2_model
 from .trainer import DDPTrainer, FSDP2Trainer
+from .trainer.base_trainer import ResumeRefused, finish_wandb_bounded
+
+# The fixed text of the line every rank prints when the resume is refused (exit 2); see the module docstring.
+REFUSED_MARKER = "RESUME REFUSED"
 
 
 def main() -> None:
@@ -94,15 +122,91 @@ def main() -> None:
         raise ValueError(f"unknown backend {cfg.backend!r}")
     dist_barrier()
 
-    wandb_run = _maybe_init_wandb(cfg)
-    trainer = Trainer(model=model, cfg=cfg, train_loader=train_loader, device=device,
-                      main_LOG=main_LOG, wandb_run=wandb_run)
+    # The Trainer decides, checks and loads the resume. W&B comes after it, so a refused resume (or a load that fails)
+    # never resumes the run's W&B id with a configuration that is not trained, nor leaves a crashed segment there. (W&B
+    # installs no SIGTERM / SIGUSR1 handler: the trainer's, set in its constructor, stay in place.)
+    try:
+        trainer = Trainer(model=model, cfg=cfg, train_loader=train_loader, device=device, main_LOG=main_LOG)
+    except ResumeRefused as e:
+        # a resume no retry can fix (the run identity or the kernel build differs): raised on every rank alike
+        print(f"[rank {get_rank()}] FATAL: {REFUSED_MARKER} (exit 2: a configuration error, not retried): {e}",
+              file=sys.stderr, flush=True)
+        _close_and_exit("refused")
+        return
+    trainer.wandb_run = _maybe_init_wandb(cfg)
     status = trainer.train()
+    _close_and_exit(status, wandb_run=trainer.wandb_run, log=main_LOG)
 
-    dist_close()
+
+def _stderr_log(msg, level: str = "info") -> None:
+    print(msg, file=sys.stderr, flush=True)
+
+
+def _close_and_exit(status: str, wandb_run=None, log=None) -> None:
+    """The end of a training process: the process group is closed first, then the master's W&B run (`wandb_run`, None
+    on the other ranks), then the process exits. W&B comes last because its finish() uploads what is left, up to
+    DM_WANDB_FINISH_TIMEOUT (60 s), and only the master has a run. Finished first, it held the other ranks in
+    dist_close's barrier, and a slow but normal upload made every rank's bounded teardown time out.
+    "stopped" exits 75 (EX_TEMPFAIL: a preemption-safe stop, the newest complete checkpoint holds the state; relaunch to
+    resume; the W&B run is marked preempting) and "refused" exits 2 (a resume refused for a reason no retry can fix:
+    ResumeRefused), whatever the teardown does: dist_close() runs in a daemon thread joined for DM_DIST_CLOSE_TIMEOUT
+    seconds (default 30; a healthy teardown takes well under a second). When it raises (a peer already gone, a broken
+    group) or hangs, that is logged, and the process exits with os._exit (after the W&B finish and flushing the logs),
+    without the interpreter's exit hooks that could block on the same group. A W&B finish that does not return in time
+    takes the os._exit path as well, so W&B's own exit hooks cannot hold the process either. "complete" closes the
+    group without a bound; a failure there is an error (exit 1, after the W&B finish), else the process exits 0.
+    `log(msg, level)` reports W&B problems (default: stderr)."""
+    code = {"stopped": 75, "refused": 2}.get(status, 0)
+    hard, close_error = False, None
+    if code:
+        try:
+            timeout = float(os.environ.get("DM_DIST_CLOSE_TIMEOUT", "30") or 30)
+        except ValueError:
+            timeout = 30.0
+        err: list = []
+
+        def close():
+            try:
+                dist_close()
+            except BaseException as e:  # noqa: BLE001 (reported below)
+                err.append(e)
+
+        t = threading.Thread(target=close, name="dist-close", daemon=True)
+        t.start()
+        t.join(max(timeout, 0.0))
+        problem = (f"did not return within {timeout:g} s (DM_DIST_CLOSE_TIMEOUT)" if t.is_alive()
+                   else f"failed ({type(err[0]).__name__}: {err[0]})" if err else None)
+        if problem:
+            msg = (f"[rank {get_rank()}] the process-group teardown (dist_close) {problem}; exiting {code} anyway"
+                   + (": the stop is complete (the newest complete checkpoint holds the state)" if code == 75 else ""))
+            try:
+                print(msg, file=sys.stderr, flush=True)    # every rank (the master's stderr is teed to its log)
+            except Exception:  # noqa: BLE001
+                pass
+            hard = True
+    else:
+        try:
+            dist_close()
+        except BaseException as e:  # noqa: BLE001 (raised again below, after the W&B finish)
+            close_error = e
+    # the master's W&B run, now that no other rank waits for this one (bounded; marked preempting on a stop)
+    if not finish_wandb_bounded(wandb_run, log or _stderr_log, preempting=(status == "stopped")):
+        hard = True
+    if close_error is not None:
+        if not hard:
+            raise close_error
+        traceback.print_exception(close_error)
+        code = 1
     logging.shutdown()
-    if status == "stopped":
-        sys.exit(75)   # EX_TEMPFAIL: a preemption-safe stop with a complete checkpoint saved; relaunch to resume
+    if hard:
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.flush()
+            except Exception:  # noqa: BLE001
+                pass
+        os._exit(code)
+    if code:
+        sys.exit(code)
 
 
 def _refuse_ddp_with_delta_matching(cfg) -> None:

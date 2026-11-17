@@ -1,0 +1,32 @@
+{
+ "about": "Byte size and sha256 of the four stream files of the default FinePDFs-Edu English build (data/pretrain_finepdfs_edu.md), written by its first verified build; later builds of the same parameters are checked against it (data/build_finepdfs_edu.py). Kept apart from checksums.json.",
+ "build": {
+  "out_name": "finepdfs_edu_en_60b",
+  "revision": "9cfabe2127faca99b3d5c4dc6d1fcb397399ebde",
+  "files": 100,
+  "edu_min": 1.5,
+  "train_tokens": 60000000000,
+  "val_tokens": 800000000,
+  "seed": 11785,
+  "job_id": "21596272",
+  "created": "2026-11-09T13:50:15-08:00"
+ },
+ "files": {
+  "finepdfs_edu_en_60b/finepdfs_edu_en_train.bin": {
+   "bytes": 120000010970,
+   "sha256": "fc35e4c9ee441fb025d3a4ecbf94f8af7eb375e6ab1c878dde5288ade5c19dc9"
+  },
+  "finepdfs_edu_en_60b/finepdfs_edu_en_train.doc_lengths.npy": {
+   "bytes": 81296792,
+   "sha256": "d4cd859fc27a12fd007bad44b5e47c4c5a13e355ccad1efb9ab0ce94dc356f81"
+  },
+  "finepdfs_edu_en_60b/finepdfs_edu_en_val.bin": {
+   "bytes": 1600032504,
+   "sha256": "13e1725afaf999f2b97ecb003811309851bebce3900162e6a16426ed01e19d24"
+  },
+  "finepdfs_edu_en_60b/finepdfs_edu_en_val.doc_lengths.npy": {
+   "bytes": 1089816,
+   "sha256": "7d785d24c812124ceace1a1713dbe2076cb35f0ec52135808d226ebd82655064"
+  }
+ }
+}

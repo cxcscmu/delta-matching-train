@@ -11,10 +11,11 @@ https://github.com/user-attachments/assets/e21ccfb8-67d8-459b-bea7-5b01d99cf902
 
 This repository contains the official training and evaluation code of the Delta-Matching: fp8 attention training in which the backward's softmax correction term (the "delta", the row sum of dO times O) is recomputed from the backward's own fp8 P and dP instead of
 the forward's bf16 output, so the five backward matmuls and the two forward matmuls of attention all run in fp8 while the
-gradient stays consistent with the realized fp8 forward. The kernel itself is the separate **delta-matching** package
-(`delta_matching`, a flash-attention-style drop-in for Hopper: `https://github.com/jet-ai-projects/delta-matching`); this
-repository is the pretraining engine, the model configs, the data recipe, the experiment launchers and the evaluation
-suite that trained and scored the arms of the following paper.
+gradient stays consistent with the realized fp8 forward. The kernel itself is the **delta-matching** package
+(`delta_matching`, a flash-attention-style drop-in for Hopper: `https://github.com/jet-ai-projects/delta-matching`),
+bundled here at `kernels/delta-matching` in its KDA-evolved build (`kernels/README.md`); this repository is the
+pretraining engine, the model configs, the data recipe, the experiment launchers and the evaluation suite that trained
+and scored the arms of the following paper.
 
 **Delta-Matching: Closing the Final Gap of Native 8-bit Training for LLMs**
 Haozhan Tang, Hao Kang, Han Cai, Song Han, Chenyan Xiong<br>
@@ -31,6 +32,8 @@ src/pretrain/            the pretraining engine (DDP + FSDP2, DCP checkpoints, e
                          attention.py (attn_impl flash | sdpa | dm | te_fp8); mlp_fp8glue.py (the fp8 cast glue)
   configs/               the study's models (Qwen3.5-shaped 3:1 hybrids, Qwen3-shaped pure attention); configs/README.md
   hf/                    the `dmlm` Hugging Face bridge (export, load; no remote code needed with this repository on the path)
+kernels/delta-matching/  the delta_matching kernel package itself, bundled: the KDA-evolved build of the Delta-Matching
+                         kernel (kernels/README.md, PROVENANCE.json); scripts/install_kernel.sh builds and installs it
 src/kernel/dm_port/      the dm mixer's orchestrator around the delta_matching kernel + its fused Triton producers
 src/kernel/fp8glue/      Triton ports of the fp8 cast glue (RMSNorm/SwiGLU + cast, cast-transpose twins, delayed scaling)
 src/evaluation/          the eval harness: val CE (memmap_ppl), RULER, lm-eval tasks (CS9, extraction, TriviaQA, MMLU), MQAR
@@ -38,6 +41,8 @@ src/inference/           the continuous-batching generation engine used by RULER
 scripts/experiments/     the paper's experiments, one script each (README.md): train and evaluate every arm and seed
 scripts/campaign/        env.sh (the environment contract), arms.sh (every arm), train_arm.sh, stage2_arm.sh,
                          eval_arm.sh, eval_arm_64k.sh, and the analysis tools (report_table.py, paired_pair.py, ...)
+scripts/slurm/           submit.sh / job.sh: any launcher as a chain of time-limited Slurm jobs, each on one node, part
+                         of one, or several nodes (README.md)
 scripts/hf/              checkpoint -> HF export -> standalone Hub repo (HF_CONVERSION.md)
 tests/                   environment, data, kernel, training, resume, launcher and evaluation checks (tests/README.md)
 docs/                    SETUP.md (install + run), train_engine.md, eval_engine.md, benchmark.md (the evaluation protocol)
@@ -57,8 +62,9 @@ attention numerics differ. `dm_mode` selects the fp8 backward's delta:
 | cuDNN / Transformer Engine FP8 | `te_fp8` | cuDNN fp8 fused attention with TE's DelayedScaling recipe |
 
 The Standard, stale and matched arms also exist without positional encoding (`nope_*`) and with the Muon optimizer
-(`muon_*`), at head_dim 256 at three model sizes (`xs_*_hd256`, `*_hd256`, `l_*_hd256`), for the GDN:MLA (`mla_*`),
-Mamba2:GQA (`mamba2_*`) and KDA:GQA (`kda_*`) hybrids and for pure GQA at the Qwen3 geometry (`gqa_*`);
+(`muon_*`), at head_dim 256 at three model sizes (`xs_*_hd256`, `*_hd256`, `l_*_hd256`) and in the 5.3 B KDA:GQA twin
+of the largest (`l_kda_*_hd256`), for the GDN:MLA (`mla_*`), Mamba2:GQA (`mamba2_*`) and KDA:GQA (`kda_*`) hybrids and
+for pure GQA at the Qwen3 geometry (`gqa_*`);
 `scripts/campaign/arms.sh` is the list and `scripts/experiments/README.md` groups them into the paper's experiments. The
 fp8 arms run the FFN and the q/k/v/o projections in fp8 (torchao `Float8Linear`, tensorwise dynamic scaling) and
 attention through the `delta_matching` kernel; the Standard arm runs the FFN in fp8 and attention in bf16. Every export
@@ -70,12 +76,10 @@ what the training numerics did to the weights.
 ## Quick start
 
 1. **Environment**: `docs/SETUP.md` section 2 (Python 3.12, torch 2.12.0+cu130, the pinned lock file; Hopper only).
-2. **Kernel** (section 3), into the environment of step 1; the bf16 arms and the evaluation do not need it:
+2. **Kernel** (section 3), into the environment of step 1; the bf16 arms and the evaluation do not need it. The kernel
+   source is bundled (`kernels/delta-matching`, the KDA-evolved build; `kernels/README.md`):
 
-       git clone https://github.com/jet-ai-projects/delta-matching && cd delta-matching
-       git submodule update --init third_party/flash-attention
-       git -C third_party/flash-attention submodule update --init csrc/cutlass
-       MAX_JOBS=8 uv pip install --no-build-isolation .
+       scripts/install_kernel.sh        # needs nvcc 13 (CUDA_HOME); fetches the pinned flash-attention headers once
 
 3. **Data**: build the data root from the public sources (`data/README.md`: the tokenizer, the stage-1 corpus, the
    stage-2 corpus, the evaluation data), then check it:
@@ -119,6 +123,10 @@ Everything is relative to the repository by default; `scripts/campaign/env.sh` i
 | `HF_HOME` | `$DM_DATA_ROOT/hf_cache` | the evaluation datasets |
 | `WANDB_ENTITY`, `WANDB_PROJECT`, `DM_WANDB` | unset (the account's default), `delta-matching`, 1 | training curves |
 | `DM_SO` | the installed library | another build of the `delta_matching` library |
+| `DM_KERNEL_SRC`, `DM_FA_SRC` | `kernels/delta-matching`, `$DM_WORKSPACE/build/flash-attention` | the kernel source `scripts/install_kernel.sh` builds, and the flash-attention headers it compiles against |
+| `DM_EXPECT_BUNDLED_KERNEL` | 1 | 0: the environment runs another kernel build on purpose (`tests/test_kernel_bundle.py` stops expecting the bundle) |
+| `DM_ALLOW_KERNEL_CHANGE` | 0 | 1: resume a checkpoint on another `delta_matching` build than the one it was trained with, or (on a kernel arm) one written before builds were recorded (every checkpoint records the build in `kernel_version.json`; otherwise the resume is refused; docs/SETUP.md section 8) |
+| `DM_ALLOW_RUN_CHANGE` | 0 | 1: resume a run whose identity changed (another `NUM_STEPS`, `DM_LR`, `EXTRA_ARGS`, yaml, ...: every resume checks `<ckpt dir>/run_identity.json` and otherwise refuses, exit 2; docs/SETUP.md section 8) |
 | `DM_TE_PY`, `DM_TE_TORCHRUN` | unset | the Transformer Engine environment for the `te_fp8` arm |
 
 The fp8 recipe's switches (`DM_SHARED_X8`, `DM_FP8_FSDP_AG`, `DM_FP8_PRECOMPUTE`, `DM_FP8GLUE`,

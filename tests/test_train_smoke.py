@@ -40,7 +40,7 @@ def _smoke(arm, run_root, root, tok_dir, test_gpu):
 
 
 @pytest.mark.parametrize("arm", ["clean_hd128", "dm_stale_hd128", "dm_matched_hd128", "dm_consistent_hd128",
-                                 "dm_stale_hd256", "dm_matched_hd256"])
+                                 "dm_auxout_hd128", "dm_stale_hd256", "dm_matched_hd256"])
 def test_tiny_arm_trains_three_steps_and_exports(arm, run_root, root, tok_dir, test_gpu):
     if arm != "clean_hd128":
         require_kernel()

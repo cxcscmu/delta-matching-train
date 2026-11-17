@@ -1,0 +1,111 @@
+# QWEN3.5 SCALE LADDER, EXTRA-LARGE cell: 9.275 B (1.75x the 5.289 B large cell, 5.6x the 1.665 B base). 2026-11-09.
+#
+# DERIVED FROM qwen35_l.yaml AND THE Qwen3.5-9B-Base BLOCK (https://huggingface.co/Qwen/Qwen3.5-9B-Base config.json:
+# hidden 4096, 32 layers at full_attention_interval 4, 16 q / 4 kv x 256 with the output gate, linear attention
+# 16 QK x 128 and 32 V heads x 128, intermediate 12288). Every width and ratio of that block is kept but the GDN V head
+# width (doubled, below); DEPTH is the lever (Qwen's 9B -> 27B step doubles the depth, 32 -> 64 layers, and also widens
+# d 4096 -> 5120): 36 layers, the depth a 2-day run on 32 GPUs allows (40 layers, 10.29 B, does not: TIME below). This
+# cell:
+#   d_model 4096, 36 layers (27 GDN + 9 attn; 36 % 4 == 0). d/L 114 (the ladder: xs 64, m 85, l 96; Qwen 9B 128,
+#     27B 80).
+#   attention 16 q / 4 kv at head_dim 256 (GQA group 4, the large cell's heads): q_dim 4096 = d_model again (the base
+#     cell and Qwen3.5-9B; the large cell had 1.33*d), kv_dim 1024 = 0.25*d, q_proj 8192 wide with the output gate,
+#     rotary 64.
+#   GDN 16 QK / 32 V heads at gdn_head_dim 128, the large cell's head shape: fla's expand_v=2 makes each V head 256
+#     wide, so key_dim 2048 = 0.5*d and value_dim 8192 = 2.0*d (the base cell's value ratio); fp32 state 32 x 128 x 256
+#     per layer. Qwen3.5-9B's V heads are 128 wide (value_dim 4096 = 1.0*d); every cell of this ladder doubles V the
+#     same way (modeling/gated_deltanet.py passes no expand_v), and this cell keeps the ladder's convention.
+#   FFN 12288 = 3.0*d (Qwen3.5-9B's exact width; the ratio of every cell of the ladder).
+#   vocab 32000, tied (the ladder's; Qwen3.5-9B unties a 248320 vocabulary): Qwen3.5-9B's own 32 layers count 8.259 B
+#     here.
+# 9,274,983,360 = 27 x 268,755,264 (GDN mixer 117,752,128 + FFN 150,994,944 + norms 8,192) + 9 x 209,723,904
+# (attention mixer 58,720,768) + embedding 131,072,000 + final norm 4,096; non-embedding 9,143,911,360; 58.27 GFLOP
+# per token (1.71x the large cell).
+#
+# head_dim 256 is the ladder's one hard kernel invariant (qwen35_l.yaml): the fp8 attention kernel's block-scale
+# contract is [64, 32] at 256 and [128, 64] at 128. Qwen3.5 uses 256 at every size, so holding it costs nothing here.
+#
+# BUDGET IS THE BASE'S, UNCHANGED: GBS 128 x 28610 steps = 30.0 B tokens (single epoch, matched optimizer steps).
+# 3.2 tok/param = 0.16x Chinchilla: deliberately UNDER-trained, like the large cell (5.7 tok/param), for the same
+# question.
+#
+# LR 2.4e-3 is NOT validated at this width (swept at 233 M; the large cell carried it up once; at 5.3 B the GDN cell
+# was smooth and the KDA twin spiked early, qwen35_l_kda.yaml). Run a 30-step probe on the WSD horizon BEFORE the grid
+# (on the 32-GPU layout it also measures this cell's step time and peak), and hedge the clean arm at 1.2e-3 through
+# the warmup (953 steps; TAG=_lr1p2e3 DM_LR=1.2e-3), decided at about step 2000 as qwen35_l_kda.yaml's hedge was.
+#
+# MEMORY on 32 H100-80GB (8 nodes x 4, FSDP2, micro-batch 1 -> ga 4), per GPU: sharded fp32 state 16 B/param / 32 =
+# 4.6 GB, PLUS a full-size fp32 gradient buffer on EVERY GPU, 4 B/param = 37.1 GB (ga > 1: the trainer turns gradient
+# sync off on the non-final micro-batches and FSDP2 then keeps each unsharded gradient in the fp32 reduce dtype;
+# fsdp2_trainer.py), PLUS one 8192-token micro-batch of activations: 54-61 GB without checkpointing (scaled from
+# qwen35_l's measured 72.2 GB peak on 8 GPUs = 10.6 state + 21.2 buffer + 40.5 activations) = 96-103 GB: DOES NOT
+# FIT. Selective checkpointing (this yaml): about 58-60 GB (estimated, unmeasured); full: about 46 GB. So this cell
+# NEEDS checkpointing, unlike the smaller cells: the launcher's COMMON passes --gradient_checkpointing false, so an xl
+# launch must append --gradient_checkpointing true after it (EXTRA_ARGS, as stage2_arm.sh does); ac_mode comes from
+# this yaml.
+# TIME (scaled from the measured 5.3 B runs; 16 -> 32 GPUs extrapolated): about 4.2-4.5 s/step without checkpointing
+# (does not fit), 4.9-5.4 s selective (estimated), 5.3-5.9 s full (1.26-1.30x, measured at 5.3 B). With about 6 % link
+# overhead that is 41-46 h selective (inside 48 hours on 32 GPUs) and 45-50 h full (borderline). The 40-layer variant
+# (--model.n_layers 40, 10.291 B) needs 46-51 h selective and 50-55 h full; 64 GPUs halve these.
+# Arms: none yet (config only). An xl_* arm needs its own line in scripts/campaign/arms.sh's _size256, because the
+# fall-through trains qwen35_m.yaml.
+run_name: qwen35_xl
+backend: fsdp2
+
+global_batch_size: 128
+per_device_batch_size: 1        # 9.3B at 8k -> ga 4 at 32 GPUs (GBS 128 exact)
+num_steps: 28610                # SAME horizon as qwen35_m.yaml => same 30B-token budget
+hf_export_steps: []
+
+gradient_checkpointing: true    # NEEDED at 32 x 80 GB (see MEMORY above); the launcher's COMMON sets it false
+ac_mode: selective
+fused_ce: true
+compile: false
+fp8: false
+bf16: true
+
+save_interval: 1192
+save_total_limit: null
+seed: 11785
+hf_save_dir:   workspace/hf/qwen35_xl
+ckpt_root_dir: workspace/ckpts
+log_root_dir:  workspace/logs
+
+model:
+  vocab_size: 32000             # DEVIATION from Qwen's 248320: see header
+  d_model: 4096
+  n_layers: 36
+  n_heads: 16
+  n_kv_heads: 4
+  head_dim: 256
+  max_seq_len: 8192
+  layer_mixers: [gated_deltanet, gated_deltanet, gated_deltanet, gqa]
+  intermediate_size: 12288  # 3*d_model, ratio held (Qwen3.5-9B's exact width)
+  gdn_head_dim: 128             # linear_key_head_dim / linear_value_head_dim
+  gdn_num_heads: 16             # QK heads; key_dim 2048 = 0.5*d
+  gdn_num_v_heads: 32           # V heads; value_dim 8192 = 2.0*d (expand_v=2 -> head_v_dim 256)
+  attn_output_gate: true
+  partial_rotary_factor: 0.25
+  qk_norm: true
+  attn_impl: sdpa
+  rope_theta: 10000000
+  norm_eps: 1.0e-6
+  tie_embeddings: true
+  z_loss_weight: 1.0e-4
+
+optim:
+  lr: 2.4e-3                     # the ladder's rate (qwen35_m.yaml, qwen35_l.yaml); see the LR note above
+  betas: [0.9, 0.95]
+  weight_decay: 0.1
+  max_grad_norm: 1.0
+  lr_scheduler_type: wsd
+  warmup_ratio: 0.0333
+  decay_ratio: 0.2
+  decay_type: linear
+
+data:
+  paths:       workspace/data/nemotron_cc_v2d1_hq_dqa/nemotron_rs_train.bin
+  doc_lengths: workspace/data/nemotron_cc_v2d1_hq_dqa/nemotron_rs_train.doc_lengths.npy
+  dtype: uint16
+  position_mode: packed
+  seed: 11785

@@ -12,6 +12,18 @@
 # (a benchmark interrupted mid-way restarts from scratch, RULER per task). When all seven are complete the EVAL_COMPLETE
 # marker is written and the script exits 0; otherwise it exits 1 naming what is missing. DM_EVAL_NO_CACHE=1 disables the
 # harness request cache (recommended when jobs are stopped often: nothing half-written can trip a restart).
+# One evaluation per run: an flock on <output dir>/.lock (env.sh dm_lock, fd 8), held by this script for the whole
+# evaluation (the val CE inherits it; the benchmarks' torchrun workers do not: torch closes the descriptor in them, and
+# this script outlives each benchmark); .lock.owner names the holder. Another live job holding it: exit 3
+# (DM_LOCK_WAIT: how long to wait for a holder that is ending, has ended or is this job).
+# In a chain (DM_PROGRESS_FILE, scripts/slurm/job.sh) the exit appends the progress lines "eval <run> <n>" when this
+# invocation added n >= 1 completion markers (*.complete, *COMPLETE) under the output dir, and "eval_complete <run>"
+# when it wrote EVAL_COMPLETE, also after a SIGTERM. The val CE counts as one: valce_n<W>.complete, written when this
+# invocation scored it (its completeness is still judged by the RESULT line and the per-window artifact).
+# The val CE's rendezvous port: DM_VALCE_PORT (job.sh sets one per job), else 29800 + DM_EVAL_GPU.
+# Exit status: 0 complete; 1 incomplete (or the lock was not released within DM_LOCK_WAIT: a failure to retry); 2 the
+# export or the val stream is missing, or the export is not patched; 3 the run is being evaluated by another live job;
+# 143 / 130 stopped by SIGTERM / SIGINT.
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd); source "$HERE/env.sh"
 RN=${1:?run name}; NW=${2:-2000}
@@ -37,6 +49,24 @@ stop_if_signalled () { [ "$STOP" -eq 0 ] || { say "stopped by a signal (a benchm
 [ -s "$VAL" ] || { echo "FATAL: val stream missing at $VAL" >&2; exit 2; }
 mkdir -p "$OUT" "$W/logs"; cd "$REPO" || exit 2
 [ -f "$OUT/EVAL_COMPLETE" ] && { echo "[$(hostname -s) $(date +%T)] $RN eval already complete ($OUT/EVAL_COMPLETE)"; exit 0; }
+# one evaluation per run: the lock is held from here on by this script (fd 8; see the header). A stop signal ends a
+# wait for it (dm_lock asks dm_lock_stop between its looks at the holder: the trap above only counts the signal)
+dm_lock_stop () { [ "$STOP" -gt 0 ]; }
+dm_lock 8 "$OUT/.lock" "$RN is being evaluated"; LRC=$?
+stop_if_signalled
+[ "$LRC" = 0 ] || exit "$LRC"
+[ -f "$OUT/EVAL_COMPLETE" ] && { echo "[$(hostname -s) $(date +%T)] $RN eval already complete ($OUT/EVAL_COMPLETE, by the job that held its lock)"; exit 0; }
+# the progress lines of this invocation, written at its exit (a chain's progress gate, scripts/slurm/job.sh)
+EV_N0=0; [ -n "${DM_PROGRESS_FILE:-}" ] && EV_N0=$(dm_eval_markers "$OUT")
+eval_progress () {
+  [ -n "${DM_PROGRESS_FILE:-}" ] || return 0
+  trap '' TERM INT   # a late signal must not cut the lines short
+  local n; n=$(dm_eval_markers "$OUT")
+  [ "$n" -gt "$EV_N0" ] && dm_progress eval "$RN" $((n - EV_N0))
+  [ -f "$OUT/EVAL_COMPLETE" ] && dm_progress eval_complete "$RN"
+  return 0
+}
+trap eval_progress EXIT
 "$PY" -c "import json, sys; c = json.load(open(sys.argv[1])); m = [c.get('mixer')] + list(c.get('layer_mixers') or []); assert c.get('attn_impl') == 'sdpa' and not {'dm', 'mla_dm'} & set(m), (c.get('attn_impl'), c.get('mixer'), c.get('layer_mixers')); print('export config OK', c.get('layer_mixers') or c.get('mixer'))" "$HFDIR/config.json" \
   || { echo "FATAL: export config not patched for the clean-kernel eval (attn_impl sdpa, no dm / mla_dm mixer; train_arm.sh does this at the end of a run)" >&2; exit 2; }
 export WANDB_MODE=disabled TORCH_HOME=$W/torch_home
@@ -45,10 +75,11 @@ say "EVAL START $RN (7 benchmarks; windows=$NW, export=$HFDIR, data=$DM_DATA_ROO
 # the RESULT before it writes the artifact, so a kill in between must re-run the scorer.
 valce_ok () { grep -aq "memmap-ppl RESULT" "$OUT/valce_n${NW}.txt" 2>/dev/null && "$PY" -c "import numpy as np,sys; a=np.load(sys.argv[1]); sys.exit(0 if a.shape==(2,int(sys.argv[2])) and np.isfinite(a[1]).all() else 1)" "$OUT/${RN}_n${NW}_perwindow.npy" "$NW" 2>/dev/null; }
 if valce_ok; then say "val CE already done"; else
-  say "1/7 val CE @ $NW windows"; rm -f "$OUT/valce_n${NW}.txt" "$OUT/${RN}_n${NW}_perwindow.npy"
-  RANK=0 LOCAL_RANK=0 WORLD_SIZE=1 MASTER_ADDR=127.0.0.1 MASTER_PORT=$((29800 + ${DM_EVAL_GPU:-0})) CUDA_VISIBLE_DEVICES=${DM_EVAL_GPU:-0} \
+  say "1/7 val CE @ $NW windows"; rm -f "$OUT/valce_n${NW}.txt" "$OUT/${RN}_n${NW}_perwindow.npy" "$OUT/valce_n${NW}.complete"
+  RANK=0 LOCAL_RANK=0 WORLD_SIZE=1 MASTER_ADDR=127.0.0.1 MASTER_PORT=${DM_VALCE_PORT:-$((29800 + ${DM_EVAL_GPU:-0}))} CUDA_VISIBLE_DEVICES=${DM_EVAL_GPU:-0} \
   "$PY" -m evaluation.ppl.memmap_ppl --model_name_or_path "$HFDIR" --data "$VAL" --dtype uint16 --seq_len 8192 \
       --max_windows "$NW" --batch_size 4 --output_dir "$OUT" --run_name "${RN}_n${NW}" > "$OUT/valce_n${NW}.txt" 2>&1 || say "  (val CE rc=$?)"
+  valce_ok && date '+%F %T' > "$OUT/valce_n${NW}.complete"   # progress accounting only (dm_eval_markers)
 fi
 grep -a "memmap-ppl RESULT" "$OUT/valce_n${NW}.txt" 2>/dev/null | tail -1 | tee -a "$LOG"
 stop_if_signalled

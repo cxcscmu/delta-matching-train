@@ -47,17 +47,23 @@ src/pretrain/
     data_loader.py       build_train_dataloader -> DistDataLoader (.sampler/.batch_size/.pad_token_id); doc-aware collate
     doc_dataset.py       DocAwareMemmapDataset: .bin + doc-length sidecar -> position_ids + cu_seqlens (§15)
   trainer/
-    base_trainer.py      shared loop, token-weighted grad-accum, clip, logging (tok/s, peak_mem_gb), ckpt orchestration, resume
-    fsdp2_trainer.py     FSDP2 backend (DCP sharded save/load + DTensor gather; set_requires_gradient_sync)
+    base_trainer.py      shared loop, token-weighted grad-accum, clip, logging (tok/s, peak_mem_gb), ckpt orchestration,
+                         the master-decided resume, the agreed stop (§7)
+    fsdp2_trainer.py     FSDP2 backend (DCP sharded save/load with its coordination over gloo + DTensor gather;
+                         set_requires_gradient_sync)
     ddp_trainer.py       DDP backend (per-rank replica save; require_backward_grad_sync gating)
     stateful.py          TrainState / ModelWrapper / OptimizerWrapper (torch DCP Stateful)
   parallel/
     dist.py              dist_init (nccl/gloo), is_master, sync_tensor, barriers
     wrap.py              build_ddp_model, build_fsdp2_model (fully_shard), AC (full/selective), compile, fp8, build_optimizer, build_lr_scheduler
     muon.py              MuonWithAdamW (opt-in optimizer, §6)
-  hf/                    the dmlm HF bridge (configuration_dmlm / modeling_dmlm / export / register_auto) -> docs/eval_engine.md
+  hf/                    the dmlm HF bridge (configuration_dmlm / modeling_dmlm / export / register_auto) -> docs/eval_engine.md;
+                         check_export.py: is an export whole (§7)
   utils/
-    ckpt.py              complete-marker atomic swap + version-string discovery
+    ckpt.py              the .complete marker (atomic, last) and its states, durable writes, .trash- removal, the
+                         trainer_state.json sidecar (§7)
+    run_identity.py      the run identity, <ckpt_dir>/run_identity.json: recorded at the first start, checked at every
+                         resume (§7)
     logging.py, misc.py  rank-aware logging; seed, Peekable, amp dtype, param count
   configs/               the study's model configs (qwen35_*.yaml hybrids, qwen3_*.yaml pure attention) + README
   scripts/
@@ -202,23 +208,106 @@ grad)/world + bf16 transient unsharded layer + activations (cut by AC).
 
 ## 7. Checkpoint & resume
 
-`checkpoint-<step>/` contains, written in this order with the `.complete` marker LAST
-(atomic rename, content = `VERSION_STRING`):
+The study's runs are chains of time-limited jobs (`docs/SETUP.md` section 8, `scripts/slurm/README.md`): a checkpoint
+must survive a kill at any moment, every rank must take the same resume decision, and a stop must end the process in
+bounded time. The docstrings of `trainer/base_trainer.py`, `utils/ckpt.py`, `utils/run_identity.py` and `train.py` are
+the reference.
+
+**A checkpoint.** `checkpoint-<step>/` holds, in the order written:
 - **resume state**: FSDP2: a DCP sharded save of `{train_state, model, optimizer,
   lr_scheduler}` (`__r_0.distcp` per rank + `.metadata`); DDP: per-rank
   `training_state_<rank>.pt` (replicas are identical; node-local-`/tmp` safe).
 - **`pytorch_model.bin`**: consolidated full (unsharded) state dict, gathered on the
   master via `DTensor.full_tensor()`, keys stripped of wrapper prefixes → loadable by a
-  fresh `PretrainLM` (verified: 0 missing/unexpected, finite loss). Plus `model_config.json`.
+  fresh `PretrainLM` (verified: 0 missing/unexpected, finite loss). Plus `model_config.json` and
+  **`kernel_version.json`**: the `delta_matching` build the run trains with (`code_sha`, `bf16_dp`, `py_sha`, `dm_so`,
+  library; `null` without the kernel).
 - per-rank **`next_train_data_<rank>.pt`** for the post-resume **sanity check** (the first resumed batch must equal
   the saved next batch; raises if `force_resume_check`, the default). The data position itself is re-derived from
   `global_step` (§5).
+- **`trainer_state.json`**, the sidecar (master, atomic): what the DCP `TrainState` does not hold, since a new
+  `TrainState` key would make every older checkpoint unloadable: `global_step`, `world_size`, `skipped_updates`,
+  `last_metrics`, `train_seconds`. It is read with defaults: a checkpoint without one still resumes.
 
-Resume finds the newest `checkpoint-*` whose `.complete` content matches `VERSION_STRING`
-(a version mismatch is treated as incompatible). Rotation runs on the master right after a new checkpoint's `.complete`
-marker: it keeps the newest `save_total_limit` complete checkpoints, the new one included (None or 0 keeps all),
-removes partial directories older than the newest complete one, and leaves directories without a step number
-(e.g. `checkpoint-final`) alone.
+Every one of these files is fsynced, then the master writes the `.complete` marker LAST (`utils/ckpt.py`: a temporary
+file, fsync, `os.replace`, a best-effort fsync of the directory; content = `VERSION_STRING`), appends
+`<epoch> <SLURM_JOB_ID or 0> ckpt <run_name> <step>` to `$DM_PROGRESS_FILE` when it is set (the Slurm chain's progress
+gate; a failure there never fails the save), and rotates.
+
+**Marker states** (`marker_state`): `complete` (this format's `VERSION_STRING`), `absent` (a save cut short),
+`mismatch` (another format version, or not a file) and `unreadable` (the marker exists but every read failed: an
+`OSError` other than "does not exist" is retried, 4 reads 1 s apart, for a Lustre client recovery's EIO / ESTALE). An
+unreadable marker is never taken for an absent one: `find_last_complete_checkpoint` raises `CheckpointMarkerUnreadable`
+instead of falling back to an older checkpoint, which would resume an older state (and, decided per rank, mix the shards
+of two histories). Its message says how to get past a marker that stays unreadable: set the checkpoint aside as
+`.bad-checkpoint-<step>`, a name nothing reads or removes.
+
+**Rotation** runs on the master right after a new marker: it keeps the newest `save_total_limit` complete checkpoints,
+the new one included (None or 0 keeps all), removes partial directories older than the newest complete one, keeps a
+directory whose marker cannot be read, and leaves directories without a step number (e.g. `checkpoint-final`) alone. A
+victim is first renamed to `.trash-<name>.<ns>` (never matched by `checkpoint-*`, so neither the resume nor the
+launchers' `dm_ckpt_step` can pick a half-deleted directory), then deleted; the master removes leftover `.trash-*`
+directories at startup. A failed rotation is a warning, never an exception (the other ranks wait in a barrier).
+
+**The resume** (`resume_routine`), in this order, so that every rank acts on one decision:
+1. The master chooses the checkpoint (the newest complete one) and broadcasts it (`_on_master`); an error there (an
+   unreadable marker) is raised on every rank, so no rank is left waiting in a collective.
+2. The run identity (`utils/run_identity.py`): the master compares this configuration's identity, the values that
+   define the trajectory (`docs/SETUP.md` section 8 lists them), with `<ckpt_dir>/run_identity.json`. A difference, or a
+   record that does not parse, raises `ResumeRefused` on every rank, and a record that cannot be read (an I/O error) a
+   `RuntimeError`, unless `DM_ALLOW_RUN_CHANGE=1` (a warning; the current values are recorded with the change). A
+   difference in the software (package versions, `DM_GIT_REV`) is a warning only.
+3. The kernel build: the master reads `kernel_version.json` and broadcasts what it read, every rank compares it with
+   its own `kernel_identity()`, and the verdicts are all-gathered. Another build, or on a kernel arm a missing or garbled
+   record, raises `ResumeRefused` on every rank, and a record that cannot be read a `RuntimeError`, unless
+   `DM_ALLOW_KERNEL_CHANGE=1` (a warning). All of this before any collective of the state load.
+4. The sidecar (read on the master, broadcast), then the backend's state load. The ranks' loaded steps and load errors
+   are all-gathered: a failure, or a different step, on any rank raises on every rank.
+5. The data position (`jump_to_step`), a replay warning when steps at or after the resume step were already logged
+   (`<run>.metrics.jsonl` keeps both segments; a W&B run resumed under the same id keeps the earlier values), and the
+   sidecar's skipped-update count. When the sidecar's world size differs from this run's, the per-rank next-batch check
+   is skipped (the global sample order does not depend on the world size, and DCP reshards); otherwise each rank loads
+   its `next_train_data_<rank>.pt` (missing or unreadable: that rank skips the check). The check's verdicts are
+   all-gathered, so every rank passes, warns or raises alike.
+6. Only then the master writes the identity record (at once for a run that starts from scratch): a resume whose load
+   fails leaves it as it was.
+
+On more ranks than the save, a DDP rank without a `training_state_<rank>.pt` of its own loads `training_state_0.pt` (the
+replicas are identical); FSDP2 reshards through DCP. A refusal (`ResumeRefused`) is a configuration error no retry can
+change; an I/O error (`RuntimeError`) may pass.
+
+**Stops.** A SIGTERM or SIGUSR1 sets the rank's stop request, and the master compares the clock with `DM_STOP_BEFORE`;
+at every step boundary `_stop_now()` MAX-all-reduces the flag (one int), so every rank of every node stops at the same
+step, saves a checkpoint (unless that step's periodic save just ran) and returns "stopped". One agreed check also runs
+before the first step, whose compile and autotuning alone can take minutes: a stop pending then (a signal during the
+startup or the load, a time budget already spent) returns "stopped" without training or saving, since the checkpoint
+the run resumed from holds its state. A run resumed at `max_steps` skips that check, does not save its complete final
+checkpoint again, and exports (the idempotent finish).
+
+**The end of the process** (`train.py`, `_close_and_exit`): the process group is closed first, then the master's W&B
+run, then the process exits: 0 complete, 75 stopped, 2 refused (every rank prints `FATAL: RESUME REFUSED ...` on its
+stderr, which the master tees into its log, so a launcher under torchrun, which reports any failure as 1, maps it back
+to 2, as it maps "Stopping early" to 75), any other status a failure. After a stop or a refusal `dist_close()` runs in a
+daemon thread joined for `DM_DIST_CLOSE_TIMEOUT` seconds (30); when it raises or hangs, the process exits with
+`os._exit` after the W&B finish and a flush of the logs, so 75 and 2 hold whatever the teardown does. The W&B finish
+(`finish_wandb_bounded`) runs in a daemon thread joined for `DM_WANDB_FINISH_TIMEOUT` seconds (60), after marking the
+run preempting on a stop; one that does not return takes the `os._exit` path too, and the run's data stays in
+`WANDB_DIR` for `wandb sync`. A slow upload therefore holds only the master, never the other ranks in the teardown's
+barrier. W&B itself is initialized only once the trainer is built (the resume decided, checked and loaded), so a refused
+resume never resumes the run's W&B id.
+
+**DCP's coordination over gloo, and the cache before a save** (FSDP2). DCP's own coordination (the save and load plans:
+`gather_object`, `scatter_object`, an `all_reduce` of small objects) runs over a CPU (gloo) process group, created on
+every rank at the first save or load; each rank still writes its own shards. Over NCCL those object collectives
+allocate device buffers, and on a nearly full GPU (the 5.3 B model peaks at about 74 of 80 GB) NCCL's own allocation
+failed: "NCCL Error 1: unhandled cuda error" in `gather_object`, rank 0 died and the others hung. For the same reason the
+training step's cached blocks are released (`torch.cuda.empty_cache()`) before every save.
+
+**Exports.** `hf/export.py` writes an export atomically file by file, with `config.json` LAST (staged in an
+`.export-tmp.*` directory inside the export directory; a failure leaves no `config.json`, and a re-export unlinks the
+old one first). `python -m pretrain.hf.check_export <dir>` (exit 0 whole, 1 not; it imports neither torch nor
+transformers) checks that `config.json` parses and that `model.safetensors` is exactly as long as its header says; the
+launchers run it before they mark a run complete (`TRAIN_COMPLETE`).
 
 ## 8. Config & launch
 
@@ -237,12 +326,16 @@ PYTHONPATH=src torchrun --standalone --nproc_per_node=N -m pretrain.train \
   --backend fsdp2 --config my_run.yaml [--optim.lr 2.4e-3 --num_steps 30000 ...]
 ```
 Single process (1 GPU / CPU): `PYTHONPATH=src python -m pretrain.train ...` (synthesizes a 1-rank world). The campaign's launcher
-is `scripts/campaign/train_arm.sh <arm> <seed>` (one node, `DM_NPROC` GPUs; `docs/SETUP.md` section 5).
-**Multi-node**: launch one `torchrun --nnodes=K --node_rank=<i> --master_addr=<head> ...` per node (under SLURM, for
-example, with `srun --nodes=K --ntasks-per-node=1`). **Storage**: checkpoints + token data go to the workspace (`DM_WORKSPACE`: node-local or
-shared scratch, never a small home quota); DCP shards land per-node, so keep the rank→node mapping stable across
-resume or use shared storage (the preemptible-cluster setup of `docs/SETUP.md` section 8), and copy checkpoints off
-the node for durability.
+is `scripts/campaign/train_arm.sh <arm> <seed>` (`DM_NPROC` GPUs per node; `docs/SETUP.md` section 5): one node, or,
+inside a Slurm job of several nodes, every node of the job (one srun step running `scripts/campaign/node_ranks.sh` per
+node, which starts that node's ranks itself; `scripts/slurm/README.md`).
+**Multi-node by hand**: launch one `torchrun --nnodes=K --node_rank=<i> --master_addr=<head> ...` per node.
+**Storage**: checkpoints + token data go to the workspace (`DM_WORKSPACE`: node-local or shared scratch, never a small
+home quota). Every rank writes its DCP shards into the one checkpoint directory, but only rank 0 writes DCP's
+`.metadata` (and the master the marker and the other master-only files), and every rank reads `.metadata` at a resume:
+on node-local storage the other nodes have neither, so a run on several nodes needs a file system every node shares,
+where it resumes on any layout, DCP resharding the state (the setup of `docs/SETUP.md` section 8). Copy checkpoints off
+scratch for durability.
 
 ## 9. Smoke test (verified)
 
@@ -656,7 +749,8 @@ src/pretrain/configs/qwen35_m.yaml --data.paths <train.bin> --data.doc_lengths <
 
 **wandb** (off by default; `--wandb true` to enable; entity = the account's default unless `--wandb_entity`, project `delta-matching`). Config fields
 (`config.py`): `wandb` / `wandb_entity` / `wandb_project` / `wandb_job_type` (a free-form grouping label; the launcher
-passes `WANDB_JT`). `train.py::_maybe_init_wandb` (master-only, guarded: a wandb failure never stops training) inits
+passes `WANDB_JT`). `train.py::_maybe_init_wandb` (master-only, guarded: a wandb failure never stops training; called
+once the Trainer is built, i.e. after the resume, and finished after the process group is closed, §7) inits
 with `name=run_name, job_type, config=asdict(cfg)`; `--wandb true` overrides an inherited `WANDB_MODE=disabled` with
 `online` (an explicit `offline` is kept). A relaunched run resumes its wandb run through the id stored in
 `{log_root}/{run_name}.wandb_id`, and `run_name<TAB>run_id` is appended to `{log_root}/wandb_runs.txt`
@@ -673,9 +767,11 @@ with W&B off).
 **Result dump** (always-on, master-only, try/except-guarded so a write failure never crashes the run).
 `TrainConfig.result_root_dir: str | None = None` (CLI-settable). At end-of-training
 (`base_trainer.py::_dump_result_summary`, called right after "Training complete") it writes
-`<result_root_dir or dirname(log_root_dir)/result>/{run_name}/train_summary.json`: a curated, durable
+`<result_root_dir or dirname(log_root_dir)/result>/{run_name}/train_summary.json` (atomically): a curated, durable
 per-baseline record: `{run_name, wandb_run_id (or None), global_step, num_steps, final_metrics (last
-logged train metrics), hf_save_dir, ckpt_dir, config: dataclasses.asdict(cfg)}`. With `result_root_dir`
+logged train metrics; a process that trained no step, one that resumed a finished run and only exported, keeps the run's
+previous ones: the resumed checkpoint's sidecar, else the existing summary), skipped_updates, hf_save_dir, ckpt_dir,
+config: dataclasses.asdict(cfg)}`. With `result_root_dir`
 pointed at `workspace/result` (= `$DM_WORKSPACE/result`) and the eval driver's
 `--output_dir` at `workspace/result/{run_name}`, each run's `train_summary.json` + `{run_name}_results.json`
 co-locate under one durable dir, so a baseline never has to be re-run.

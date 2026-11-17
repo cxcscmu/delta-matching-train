@@ -160,8 +160,8 @@ class GQAAttention(nn.Module):
                 import delta_matching  # noqa: F401
             except ImportError as e:
                 raise ImportError("attn_impl='dm' needs the Delta-Matching kernel package: install the delta-matching "
-                                  "kernel package (see docs/SETUP.md section 3: git clone --recursive, then "
-                                  "pip install --no-build-isolation .)") from e
+                                  "kernel package (see docs/SETUP.md section 3: scripts/install_kernel.sh builds the bundled "
+                                  "kernels/delta-matching)") from e
             from delta_matching import dm_attn_func_bhnd, kernel_version
             from delta_matching.attn import _ops_gt
             from delta_matching.core import _check_hd

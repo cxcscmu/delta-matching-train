@@ -15,15 +15,48 @@ Gradient-accumulation math (token-weighted, exact for the packed-pretraining cas
   when model.z_loss_weight > 0, the z-loss z_loss_weight * lse_tok^2 (lse = the log of
   the softmax normalizer; with 1e-4 and a 32k vocabulary about +0.011 at init). L_rank
   is logged as `train/ce_loss`, z-loss included.
+
+Checkpoints and resume (a run is a chain of 4-hour jobs; docs/SETUP.md):
+  * A checkpoint is complete when its `.complete` marker is there (utils/ckpt.py). Every file the resume needs is
+    fsynced before the marker: the DCP shards (DCP itself), next_train_data_<rank>.pt (each rank), pytorch_model.bin,
+    model_config.json, kernel_version.json and the sidecar trainer_state.json (the master; DDP: each rank's
+    training_state_<rank>.pt). The sidecar holds what the DCP TrainState does not (a new TrainState key would make every
+    older checkpoint unloadable): the skipped-update count, the world size, the last logged metrics, the training wall
+    time. It is read with defaults, so checkpoints written before it existed still resume.
+  * Right after a marker the master appends "<epoch> <SLURM_JOB_ID or 0> ckpt <run_name> <step>" to $DM_PROGRESS_FILE
+    when it is set (scripts/slurm/job.sh's progress gate; never fails the save).
+  * Rotation keeps the newest save_total_limit complete checkpoints and removes a victim by renaming it to
+    `.trash-<name>.<ns>` first (never matched by `checkpoint-*`), then deleting it; a directory whose marker cannot be
+    read is kept. The master removes leftover `.trash-*` directories at startup.
+  * The resume is decided on the master and broadcast: it finds the newest complete checkpoint (an unreadable marker
+    raises instead of falling back to an older one; the error says how to set such a checkpoint aside), reads
+    kernel_version.json and the sidecar, checks the run identity (utils/run_identity.py: <ckpt_dir>/run_identity.json;
+    DM_ALLOW_RUN_CHANGE=1 turns a refusal into a warning; the record is written only once the state has loaded, so a
+    load that fails changes nothing) and every rank acts on that one decision; an error on the master is raised on
+    every rank. After the state load the ranks' loaded steps are compared (all-gather). A per-rank failure to read
+    next_train_data_<rank>.pt only skips the data-stream sanity check (the data position comes from global_step); so
+    does a world-size change (the global sample order does not depend on it; DCP reshards, and a DDP rank without a
+    training_state file of its own loads rank 0's: the replicas are identical).
+  * A stop that is pending before the first step (a signal during startup, or DM_STOP_BEFORE already past) returns
+    "stopped" without training or saving: a resumed run's newest checkpoint already holds this state, a fresh run has
+    nothing to save. A run resumed AT max_steps (a finished run) still exports.
+  * W&B: the trainer logs to `wandb_run` (pretrain.train sets it once the trainer is built) but never closes it.
+    pretrain.train does that after the process group is closed (finish_wandb_bounded: DM_WANDB_FINISH_TIMEOUT seconds,
+    default 60, for run.finish(); on a stop the run is marked preempting first), so a slow upload holds only the
+    master.
+  * Env: DM_STOP_BEFORE (epoch seconds: the time budget), DM_PROGRESS_FILE, DM_ALLOW_RUN_CHANGE, DM_ALLOW_KERNEL_CHANGE,
+    DM_WANDB_FINISH_TIMEOUT, SLURM_JOB_ID (the progress lines' job id).
 """
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import math
 import os
-import shutil
 import signal
+import sys
+import threading
 import time
 import traceback
 from collections import defaultdict
@@ -39,22 +72,207 @@ from torch.nn.parallel import DistributedDataParallel
 from tqdm import tqdm
 
 from ..parallel.dist import (
-    is_master, dist_barrier, get_rank, get_world_size, sync_tensor,
+    is_master, dist_barrier, get_rank, get_world_size, sync_tensor, broadcast_object, all_gather_objects,
 )
 from ..parallel.dist import is_dist as _is_dist
 from ..parallel.wrap import build_optimizer, build_lr_scheduler, fp8_fsdp_all_gather_enabled
 from ..utils.misc import Peekable, get_amp_dtype
 from ..utils.ckpt import (
-    CKPT_NAME_FORMAT, checkpoint_step,
-    find_last_complete_checkpoint, check_complete_marker, create_complete_marker_atomic_swap,
+    CKPT_NAME_FORMAT, CKPT_GLOB, TRAINER_STATE_FILE, COMPLETE, ABSENT, MISMATCH, UNREADABLE,
+    CheckpointMarkerUnreadable, checkpoint_step, find_last_complete_checkpoint, create_complete_marker_atomic_swap,
+    marker_state_why, read_text_retry, read_trainer_state, torch_save_durable, write_text_atomic, write_json_atomic,
+    fsync_dir, trash_checkpoint, cleanup_trash, unreadable_marker_message,
+)
+from ..utils.run_identity import (
+    plan_run_identity, record_run_identity, ALLOW_ENV, OK as IDENTITY_OK, REFUSED as IDENTITY_REFUSED,
 )
 from ..utils.logging import RED, CYAN, RESET
+
+
+class ResumeRefused(RuntimeError):
+    """A resume refused for a reason a retry cannot change: the run identity differs (utils/run_identity.py) or the
+    checkpoint's delta_matching build does (or cannot be told). Raised on every rank; pretrain.train prints its
+    "RESUME REFUSED" line and exits 2, the configuration-error status a chain of jobs does not retry. (A record that
+    cannot be READ is a plain RuntimeError, exit 1: an I/O error may pass.)"""
+
+
+def finish_wandb_bounded(run, log, preempting: bool = False) -> bool:
+    """run.finish(), bounded: it has no timeout of its own (it waits for the upload), so it runs in a daemon thread
+    joined for DM_WANDB_FINISH_TIMEOUT seconds (default 60). On a stop (preempting) the run is first marked preempting
+    when it has mark_preempting(): W&B then shows it as preempted (to be resumed), not finished. Returns False when
+    finish() did not return in time (the run's data stays in WANDB_DIR; `wandb sync` uploads it later), else True.
+    Never raises; `log(msg, level)` reports problems. pretrain.train calls it after the process group is closed (the
+    other ranks must not wait for the master's upload); `run` None (the other ranks, W&B off) is a no-op."""
+    if run is None:
+        return True
+    if preempting:
+        mark = getattr(run, "mark_preempting", None)
+        if callable(mark):
+            try:
+                mark()
+            except Exception as e:  # noqa: BLE001
+                log(f"[wandb] mark_preempting failed: {e}", "warning")
+    try:
+        timeout = float(os.environ.get("DM_WANDB_FINISH_TIMEOUT", "60") or 60)
+    except ValueError:
+        timeout = 60.0
+    errors: list = []
+
+    def finish():
+        try:
+            run.finish()
+        except BaseException as e:  # noqa: BLE001 (reported by the caller's thread)
+            errors.append(e)
+
+    t = threading.Thread(target=finish, name="wandb-finish", daemon=True)
+    t.start()
+    t.join(max(timeout, 0.0))
+    if t.is_alive():
+        log(f"{RED}[wandb] run.finish() did not return within {timeout:g} s (DM_WANDB_FINISH_TIMEOUT): not waiting any "
+            f"longer; the run's data stays in WANDB_DIR (upload it with `wandb sync`){RESET}", "warning")
+        return False
+    if errors:
+        log(f"[wandb] finish failed: {errors[0]}", "warning")
+    return True
+
+
+def append_progress(kind: str, run: Any, detail: Any = "") -> None:
+    """Append "<epoch> <SLURM_JOB_ID or 0> <kind> <run> [detail]" to $DM_PROGRESS_FILE when it is set: the durable-
+    progress record scripts/slurm/job.sh reads to tell a link that made progress from one that did not. One write of
+    the whole line with O_APPEND (concurrent writers do not interleave within a line); any failure is ignored: a
+    progress line never fails a save."""
+    path = os.environ.get("DM_PROGRESS_FILE")
+    if not path:
+        return
+    try:
+        line = f"{int(time.time())} {os.environ.get('SLURM_JOB_ID') or 0} {kind} {run}"
+        line += f" {detail}\n" if str(detail) != "" else "\n"
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        try:
+            os.write(fd, line.encode())
+        finally:
+            os.close(fd)
+    except Exception:  # noqa: BLE001 (best effort by contract)
+        pass
+
+
+def last_logged_step(metrics_path) -> Optional[int]:
+    """The highest step of a "metrics" record in a <run>.metrics.jsonl (what a W&B run that resumes the same id has
+    already seen); None when there is none or the file cannot be read. Never raises."""
+    if metrics_path is None:
+        return None
+    best = None
+    try:
+        with open(metrics_path, "r", errors="replace") as fh:
+            for line in fh:
+                if '"metrics"' not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict) and rec.get("event") == "metrics" and isinstance(rec.get("step"), int):
+                    best = rec["step"] if best is None else max(best, rec["step"])
+    except OSError:
+        return None
+    return best
 
 
 def export_key(key: str) -> str:
     """A training state-dict key -> the plain module name the HF export uses: drops the activation-checkpoint
     wrapper and the torch.compile (OptimizedModule) levels."""
     return key.replace("._checkpoint_wrapped_module", "").replace("._orig_mod", "")
+
+
+KERNEL_FILE = "kernel_version.json"   # in every checkpoint: the delta_matching build the run trained with
+
+
+def kernel_py_sha(pkg_dir) -> Optional[str]:
+    """The Python half of a delta_matching package (the fp8 producers, the backward split, ...), which code_sha (csrc/
+    only) does not cover: sha256 over the sorted names and bytes of its *.py files except the build stamp _build_info.py,
+    first 12 hex digits (kernels/PROVENANCE.json py_sha). None when the directory cannot be read."""
+    try:
+        h = hashlib.sha256()
+        for f in sorted(os.listdir(pkg_dir)):
+            if f.endswith(".py") and f != "_build_info.py":
+                h.update(f.encode())
+                h.update(Path(pkg_dir, f).read_bytes())
+        return h.hexdigest()[:12]
+    except OSError:
+        return None
+
+
+def kernel_identity() -> Optional[dict]:
+    """The delta_matching kernel build this process trains with: kernel_version()'s code_sha (the hash of the csrc/ the
+    package was built from), its bf16_dp flag and library path; py_sha, the hash of the package's Python files
+    (kernel_py_sha); and dm_so, the library DM_SO names instead of the package's own build (resolved path; None without
+    DM_SO): code_sha is the installed package's stamp, so the path is all that identifies such a library. None when no
+    layer imported the kernel package (the bf16-attention arms). Builds of different kernel sources (the bundled
+    KDA-evolved kernel, the original release) differ in their head_dim-128 numerics at round-off level, so checkpoints
+    record it and a resume compares it."""
+    mod = sys.modules.get("delta_matching")
+    if mod is None:
+        return None
+    so = os.environ.get("DM_SO") or None
+    so = os.path.realpath(so) if so else None
+    f = getattr(mod, "__file__", None)
+    py = kernel_py_sha(os.path.dirname(os.path.abspath(f))) if f else None
+    try:
+        kv = mod.kernel_version()
+    except Exception as e:  # noqa: BLE001 (a provenance stamp must never stop a run)
+        return {"code_sha": None, "py_sha": py, "dm_so": so, "error": f"{type(e).__name__}: {e}"}
+    return {"code_sha": kv.get("code_sha"), "bf16_dp": kv.get("bf16_dp"), "py_sha": py, "dm_so": so,
+            "library": kv.get("library")}
+
+
+def check_kernel_identity(saved: Optional[dict], now: Optional[dict], ckpt, allow: bool) -> Optional[str]:
+    """None when a checkpoint's kernel (`saved`, its KERNEL_FILE) and this process's (`now`, kernel_identity()) are the
+    same build (code_sha, bf16_dp, py_sha and dm_so; a missing field reads as None; the package's library path may
+    differ).
+    Otherwise the mismatch message: raised as a RuntimeError, or returned for a warning when `allow`
+    (DM_ALLOW_KERNEL_CHANGE=1)."""
+    def key(d):
+        return None if d is None else (d.get("code_sha"), bool(d.get("bf16_dp")), d.get("py_sha"), d.get("dm_so"))
+    if key(saved) == key(now):
+        return None
+    msg = (f"{ckpt} was trained with the delta_matching kernel {saved}, but this process runs {now}. Resuming would "
+           "continue the run on another kernel build, whose head_dim-128 numerics are not bitwise the same; install "
+           "the checkpoint's kernel (scripts/install_kernel.sh, DM_KERNEL_SRC; kernels/README.md) or set "
+           "DM_ALLOW_KERNEL_CHANGE=1 to continue anyway")
+    if not allow:
+        raise RuntimeError(msg)
+    return msg
+
+
+def _kernel_verdict(rec: dict, now: Optional[dict], ckpt, allow: bool) -> tuple[Optional[str], bool, bool]:
+    """(message, refuse, deterministic) for a checkpoint's KERNEL_FILE as the master read it (`rec`: {"text": ...},
+    {"missing": True} or {"error": "..."}) against this process's kernel_identity() `now`: (None, False, _) = the same
+    build or no kernel to compare; (msg, False, _) = a difference allowed by DM_ALLOW_KERNEL_CHANGE=1 (a warning);
+    (msg, True, det) = refuse; det False only when the record could not be read (an I/O error may pass)."""
+    deterministic = True
+    if "text" in rec:
+        try:
+            saved = json.loads(rec["text"])
+            if saved is not None and not isinstance(saved, dict):
+                raise ValueError(f"not a kernel record: {saved!r}")
+        except ValueError as e:
+            problem = f"it is unreadable ({type(e).__name__}: {e})"
+        else:
+            try:
+                return check_kernel_identity(saved, now, ckpt, allow), False, True
+            except RuntimeError as e:
+                return str(e), True, True
+    elif rec.get("missing"):
+        problem = "there is none (written before kernel builds were recorded)"
+    else:
+        problem = f"it is unreadable ({rec.get('error')})"
+        deterministic = False
+    if now is None:   # no kernel in this process: nothing to compare
+        return None, False, True
+    msg = (f"cannot tell which delta_matching build {ckpt} was trained with: {KERNEL_FILE} {problem}; this process "
+           f"runs {now}. Install the kernel the run was trained with (scripts/install_kernel.sh, DM_KERNEL_SRC; "
+           "kernels/README.md) or set DM_ALLOW_KERNEL_CHANGE=1 to resume on this build")
+    return msg, not allow, deterministic
 
 
 def _resolve_forward_ctx(model: nn.Module):
@@ -106,6 +324,11 @@ class BaseTrainer:
 
         self.global_step = 0
         self._last_metrics: dict[str, Any] = {}
+        self._nonfinite_steps = 0          # skipped updates of the whole run (seeded from the resumed sidecar)
+        self._trained_steps = 0            # optimizer steps this process ran (0: it only resumed and exported, or stopped)
+        self._resume_state: dict = {}      # the resumed checkpoint's sidecar (trainer_state.json), {} when none
+        self._train_t0: Optional[float] = None
+        self._identity_record = None       # master: the run_identity.json to write once the resume has loaded
         self._hf_export_steps = set(cfg.hf_export_steps or [])  # token-budget ladder: export {hf_save_dir}/step{N}
         self.epoch = 0
         self.train_loader.sampler.set_epoch(self.epoch)
@@ -158,6 +381,11 @@ class BaseTrainer:
         if is_master():
             self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
             self.log_dir.mkdir(parents=True, exist_ok=True)
+            # what an interrupted rotation left (it renames a victim to .trash-<name>.<ns> before deleting it)
+            removed = cleanup_trash(self.checkpoint_dir)
+            if removed:
+                self.main_log(f"[ckpt] removed {len(removed)} leftover directories of an interrupted rotation under "
+                              f"{self.checkpoint_dir}: {', '.join(removed[:4])}{' ...' if len(removed) > 4 else ''}")
         dist_barrier()
 
     def _setup_training(self) -> None:
@@ -399,77 +627,275 @@ class BaseTrainer:
 
         self.main_log(f"Saving checkpoint -> {save_dir}")
         t0 = time.time()
-        self._save_resume_state(save_dir)            # backend: DCP / torch.save
-        self._save_full_model(save_dir)              # HF-loadable bin + config (master)
-        self._save_dataloader_state(save_dir)        # per-rank next batch (resume sanity check)
+        self._save_resume_state(save_dir)            # backend: DCP (fsyncs its files) / torch.save (fsynced)
+        self._save_full_model(save_dir)              # HF-loadable bin + config + kernel record (master, fsynced)
+        self._save_dataloader_state(save_dir)        # per-rank next batch (resume sanity check, fsynced)
+        if is_master():
+            self._write_trainer_state(save_dir)      # the sidecar (atomic, fsynced): before the barrier of the marker
         dist_barrier()
         if is_master():
+            fsync_dir(save_dir)                      # the names of the files above (best effort)
             create_complete_marker_atomic_swap(save_dir, version_str=self.cfg.VERSION_STRING)
+            # durable progress for the chain (scripts/slurm/job.sh): right after the marker, never raises
+            append_progress("ckpt", getattr(self.cfg, "run_name", None), self.global_step)
             # rotate only once the new checkpoint is complete, so an interrupted save never costs an old one
             self._rotate_checkpoints(base)
         dist_barrier()
         self._metrics_event("checkpoint", path=str(save_dir), seconds=round(time.time() - t0, 1))
         return save_dir
 
+    def _trainer_state(self) -> dict:
+        """The sidecar of a checkpoint (TRAINER_STATE_FILE): what the resume needs beyond the DCP payload. Every field is
+        read with a default (read_trainer_state), so a checkpoint without it (an older one) still resumes."""
+        prev = getattr(self, "_resume_state", None) or {}
+        t0 = getattr(self, "_train_t0", None)
+        try:
+            seconds = float(prev.get("train_seconds", 0) or 0) + (time.time() - t0 if t0 else 0.0)
+        except (TypeError, ValueError):
+            seconds = 0.0
+        return {
+            "format": 1,
+            "run_name": getattr(self.cfg, "run_name", None),
+            "global_step": int(self.global_step),
+            "world_size": get_world_size(),                        # a resume on another world size skips the per-rank
+            "skipped_updates": int(getattr(self, "_nonfinite_steps", 0) or 0),   # next-batch check
+            "last_metrics": dict(getattr(self, "_last_metrics", None) or {}),
+            "train_seconds": round(seconds, 1),                    # wall time in train() over every job of the run
+            "time": round(time.time(), 3),
+            "iso": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+
+    def _write_trainer_state(self, save_dir: Path) -> None:
+        """Master: write the sidecar atomically (temporary file + fsync + os.replace). A failure fails the save (it is
+        written before the marker, like every other file of the checkpoint)."""
+        write_json_atomic(Path(save_dir) / TRAINER_STATE_FILE, self._trainer_state())
+
     def _rotate_checkpoints(self, base: Path) -> None:
         """Keep the newest `save_total_limit` COMPLETE checkpoints under `base`, the one just saved included
         (None or 0 keeps all). Runs on the master after the new checkpoint's marker is written. A partial dir (no
-        valid marker: a save that was killed) older than the newest complete one is removed; a partial dir never
-        displaces a complete one. Dirs whose name carries no step number are left alone."""
-        limit = self.cfg.save_total_limit
-        dirs = sorted((p for p in Path(base).glob("checkpoint-*") if p.is_dir() and checkpoint_step(p) >= 0),
-                      key=checkpoint_step)
-        complete = [p for p in dirs if check_complete_marker(p, self.cfg.VERSION_STRING)]
-        newest = checkpoint_step(complete[-1]) if complete else -1
-        for p in dirs:
-            if p not in complete and checkpoint_step(p) < newest:
-                self.main_log(f"Removing partial checkpoint {p} (older than the newest complete one)", "warning")
-                shutil.rmtree(p, ignore_errors=True)
-        if limit:
-            for p in complete[:-limit]:
-                shutil.rmtree(p, ignore_errors=True)
+        valid marker: a save that was killed, or another format version's marker) older than the newest complete one
+        is removed; a partial dir never displaces a complete one. Dirs whose name carries no step number are left
+        alone, and so is a dir whose marker exists but cannot be read (marker_state "unreadable": it may be the
+        newest complete checkpoint). A victim is renamed to `.trash-<name>.<ns>` before it is deleted
+        (utils/ckpt.py::trash_checkpoint), so an interrupted deletion never leaves a complete-looking remnant. Never
+        raises: the other ranks wait in a barrier meanwhile, and a failed rotation only keeps old checkpoints longer."""
+        try:
+            limit = self.cfg.save_total_limit
+            version = self.cfg.VERSION_STRING
+            dirs = sorted((p for p in Path(base).glob(CKPT_GLOB) if p.is_dir() and checkpoint_step(p) >= 0),
+                          key=checkpoint_step)
+            states = {}
+            for p in dirs:
+                states[p], why = marker_state_why(p, version)
+                if states[p] == UNREADABLE:
+                    self.main_log(f"{RED}[ckpt] keeping {p}: its marker exists but cannot be read ({why}){RESET}",
+                                  "warning")
+            complete = [p for p in dirs if states[p] == COMPLETE]
+            newest = checkpoint_step(complete[-1]) if complete else -1
+            for p in dirs:
+                if states[p] in (ABSENT, MISMATCH) and checkpoint_step(p) < newest:
+                    self.main_log(f"Removing partial checkpoint {p} (older than the newest complete one)", "warning")
+                    self._remove_checkpoint(p)
+            if limit:
+                # DM_CKPT_KEEP_STEPS="6000,..." (opt-in, default empty): checkpoints of these steps are never rotated
+                # away (an analysis snapshot inside a run that otherwise keeps only the newest save_total_limit)
+                keep = {int(x) for x in os.environ.get("DM_CKPT_KEEP_STEPS", "").replace(" ", "").split(",") if x}
+                for p in complete[:-limit]:
+                    if checkpoint_step(p) in keep:
+                        continue
+                    self._remove_checkpoint(p)
+        except Exception as e:  # noqa: BLE001
+            self.main_log(f"{RED}[ckpt] checkpoint rotation under {base} failed ({type(e).__name__}: {e}); the old "
+                          f"checkpoints stay until a later save rotates them{RESET}", "warning")
+
+    def _remove_checkpoint(self, p: Path) -> None:
+        msg = trash_checkpoint(p)
+        if msg:
+            self.main_log(f"{RED}[ckpt] {msg}{RESET}", "warning")
 
     def _save_full_model(self, save_dir: Path) -> None:
         full_sd = self._gather_full_state_dict()
         if is_master():
-            torch.save(full_sd, save_dir / "pytorch_model.bin")
-            self.unwrapped_model.save_config(save_dir)
+            torch_save_durable(full_sd, save_dir / "pytorch_model.bin")
+            self.unwrapped_model.save_config(save_dir)              # model_config.json (fsynced by the model)
+            # the kernel build, compared on resume
+            write_text_atomic(save_dir / KERNEL_FILE, json.dumps(kernel_identity()))
         dist_barrier()
+
+    def _on_master(self, fn, what: str):
+        """fn() run on the master only; its result (plain, picklable data) is broadcast and returned on every rank. An
+        exception on the master is raised on every rank (the master's own, the others a RuntimeError with its message),
+        so no rank is left waiting in the next collective while the master is gone. Without a process group: fn()."""
+        result, err, exc = None, None, None
+        if is_master():
+            try:
+                result = fn()
+            except Exception as e:  # noqa: BLE001 (handed to every rank below)
+                exc = e
+                err = f"{what} failed on rank 0: {type(e).__name__}: {e}"
+                self.main_log(f"{RED}{err}; every rank stops{RESET}", "critical")
+        result, err = broadcast_object((result, err))
+        if exc is not None:
+            raise exc
+        if err is not None:
+            raise RuntimeError(err)
+        return result
+
+    def _check_resume_kernel(self, ckpt: Path) -> None:
+        """Refuse to resume `ckpt` on another delta_matching build than the one it was trained with
+        (check_kernel_identity), and, when this process runs the kernel, from a checkpoint whose build cannot be read: no
+        KERNEL_FILE (written before builds were recorded, most likely on the original release) or an unreadable one.
+        DM_ALLOW_KERNEL_CHANGE=1 turns a refusal into a warning (and is itself a warning when nothing differs: a chain
+        passes it on to every later job, where it would accept a later accidental change; it is needed until the run
+        has saved a checkpoint on the new build). The master reads KERNEL_FILE and broadcasts what it read (or why it
+        could not), so every rank compares the same record; the ranks' verdicts are then gathered and a refusal on any
+        rank is raised on every rank, before any collective of the state load."""
+        allow = os.environ.get("DM_ALLOW_KERNEL_CHANGE", "0") == "1"
+        now = kernel_identity()
+        f = Path(ckpt) / KERNEL_FILE
+
+        def read() -> dict:
+            try:
+                return {"text": read_text_retry(f)}
+            except (FileNotFoundError, NotADirectoryError):
+                return {"missing": True}
+            except OSError as e:
+                return {"error": f"{type(e).__name__}: {e}"}
+
+        rec = self._on_master(read, f"reading {f}")
+        msg, fatal, deterministic = _kernel_verdict(rec, now, ckpt, allow)
+        verdicts = all_gather_objects((msg, fatal, deterministic))
+        refusals = [(m, det) for m, bad, det in verdicts if bad]
+        if refusals:
+            m, det = refusals[0]
+            raise (ResumeRefused if det else RuntimeError)(m)
+        if msg:
+            self.main_log(f"{RED}[kernel] {msg} (continuing: DM_ALLOW_KERNEL_CHANGE=1){RESET}", "warning")
+        elif allow:
+            self.main_log(f"{RED}[kernel] DM_ALLOW_KERNEL_CHANGE=1 is set, but {ckpt} needs no kernel change (the same "
+                          "build, or no kernel to compare): the knob is not needed. Unset it once the run has saved a "
+                          "checkpoint on the new build (a chain of jobs passes it on to every later job): while it is "
+                          f"set, a later change of the kernel build is accepted with a warning only{RESET}", "warning")
 
     def _save_dataloader_state(self, save_dir: Path) -> None:
         # per-rank next batch for the resume sanity check (the data position itself is re-derived from global_step)
         nxt = self.peek_next_train_data()
-        torch.save({"input_ids": nxt["input_ids"]}, save_dir / f"next_train_data_{get_rank()}.pt")
+        torch_save_durable({"input_ids": nxt["input_ids"]}, save_dir / f"next_train_data_{get_rank()}.pt")
         dist_barrier()
 
-    def load(self, load_dir: Path, global_step: int = -1) -> Optional[Path]:
-        if global_step == -1:
-            ckpt = find_last_complete_checkpoint(load_dir, version_str=self.cfg.VERSION_STRING)
-        else:
+    def _resume_decision(self, load_dir: Path, global_step: int = -1) -> Optional[Path]:
+        """The checkpoint to resume, decided on the master and broadcast (every rank loads the same one): the newest
+        complete `checkpoint-*` under `load_dir`, or `checkpoint-<global_step>` when it is complete. None when there
+        is none. A marker that exists but cannot be read raises on every rank (never a silent fall back to an older
+        checkpoint; a per-rank decision let one rank's transient read error resume it elsewhere than the others)."""
+        version = self.cfg.VERSION_STRING
+
+        def decide() -> Optional[str]:
+            if global_step == -1:
+                ckpt = find_last_complete_checkpoint(load_dir, version_str=version)
+                return None if ckpt is None else str(ckpt)
             ckpt = Path(load_dir) / CKPT_NAME_FORMAT.format(step=global_step)
-            if not check_complete_marker(ckpt, self.cfg.VERSION_STRING):
-                ckpt = None
+            state, why = marker_state_why(ckpt, version)
+            if state == UNREADABLE:
+                raise CheckpointMarkerUnreadable(unreadable_marker_message(ckpt, why))
+            return str(ckpt) if state == COMPLETE else None
+
+        path = self._on_master(decide, f"choosing the checkpoint to resume under {load_dir}")
+        return None if path is None else Path(path)
+
+    def load(self, load_dir: Path, global_step: int = -1) -> Optional[Path]:
+        """Resume from the newest complete checkpoint under `load_dir` (or checkpoint-<global_step>): None when there is
+        none, else the checkpoint loaded (_resume_decision, then _load_checkpoint)."""
+        ckpt = self._resume_decision(load_dir, global_step)
         if ckpt is None:
             return None
+        return self._load_checkpoint(ckpt)
 
+    def _load_checkpoint(self, ckpt: Path) -> Path:
+        """Load `ckpt` (the master's decision) on every rank: the kernel check, the sidecar (master, broadcast), the
+        backend state, then the ranks' loaded steps are compared (all-gather) and a failure on any rank is raised on
+        every rank. Then the data position, the replay warning, the sidecar's skipped-update count and world size, and
+        this rank's next_train_data for the sanity check (a file that cannot be read only skips the check)."""
+        self._check_resume_kernel(ckpt)
+        state, note = self._on_master(lambda: read_trainer_state(ckpt), f"reading {Path(ckpt) / TRAINER_STATE_FILE}")
+        if note:
+            self.main_log(f"{RED}[resume] {note}{RESET}", "warning")
+
+        loaded, err = None, None
         try:
-            loaded_step = self._load_resume_state(ckpt)
-        except BaseException as e:  # noqa
-            self.main_log(f"{RED}Failed to load resume state from {ckpt}: {e}{RESET}\n{traceback.format_exc()}",
-                          "critical")
-            raise
+            loaded = int(self._load_resume_state(ckpt))
+        except Exception as e:  # noqa: BLE001 (gathered below and raised on every rank)
+            err = f"rank {get_rank()}: {type(e).__name__}: {e}"
+            tb = traceback.format_exc()
+            if is_master():
+                self.main_log(f"{RED}Failed to load resume state from {ckpt}: {e}{RESET}\n{tb}", "critical")
+            else:
+                print(f"[rank {get_rank()}] Failed to load resume state from {ckpt}: {e}\n{tb}", file=sys.stderr,
+                      flush=True)
+        results = all_gather_objects((loaded, err))
+        errors = [e for _, e in results if e]
+        if errors:
+            raise RuntimeError(f"Failed to load resume state from {ckpt}: " + "; ".join(errors))
+        steps = [s for s, _ in results]
+        if len(set(steps)) != 1:
+            raise RuntimeError(f"the ranks loaded different steps from {ckpt} (in rank order: {steps}); refusing to "
+                               "train on a mix of states")
+        loaded_step = steps[0]
 
         # global_step is the COMPLETED-step count; the checkpoint saved after step
         # `loaded_step` completed, so we continue *at* loaded_step (its batch is the
         # one stored in next_train_data_{rank}.pt for the sanity check).
         self.jump_to_step(loaded_step)
+        self._replay_warning(loaded_step)
 
-        nxt_path = ckpt / f"next_train_data_{get_rank()}.pt"
-        if nxt_path.exists():
-            self.next_train_data_for_check = torch.load(nxt_path, map_location="cpu", weights_only=True)
-        self.resume_sanity_check_done = False
+        if state and state.get("global_step") not in (None, loaded_step):
+            self.main_log(f"{RED}[resume] {TRAINER_STATE_FILE} of {ckpt} is for step {state.get('global_step')}, not "
+                          f"{loaded_step}: ignored{RESET}", "warning")
+            state = {}
+        self._resume_state = state or {}
+        try:
+            self._nonfinite_steps = int(self._resume_state.get("skipped_updates", 0) or 0)
+        except (TypeError, ValueError):
+            self._nonfinite_steps = 0
+        if self._nonfinite_steps:
+            self.main_log(f"[resume] {self._nonfinite_steps} updates were skipped (non-finite gradients) before step "
+                          f"{loaded_step}; train/skipped_updates continues from there")
+
+        self.next_train_data_for_check, self._resume_check_note = None, None
+        saved_ws, now_ws = self._resume_state.get("world_size"), get_world_size()
+        if isinstance(saved_ws, int) and saved_ws != now_ws:
+            # the global sample order does not depend on the world size (rank r takes every W-th sample of one
+            # order) and DCP reshards the model and optimizer state: only the per-rank comparison cannot be made
+            self.main_log(f"{RED}[resume] {ckpt} was saved by {saved_ws} ranks and this run has {now_ws}: the per-rank "
+                          f"next-batch sanity check is skipped (the data order is the same at any world size){RESET}",
+                          "warning")
+            self.resume_sanity_check_done = True
+        else:
+            nxt_path = Path(ckpt) / f"next_train_data_{get_rank()}.pt"
+            try:
+                self.next_train_data_for_check = torch.load(nxt_path, map_location="cpu", weights_only=True)
+            except FileNotFoundError:
+                self._resume_check_note = f"{nxt_path.name} is missing"
+            except Exception as e:  # noqa: BLE001 (EOFError, UnpicklingError, OSError, RuntimeError, ...): skip the check
+                self._resume_check_note = f"{nxt_path.name} cannot be read ({type(e).__name__}: {e})"
+            self.resume_sanity_check_done = False
         dist_barrier()
-        return ckpt
+        return Path(ckpt)
+
+    def _replay_warning(self, step: int) -> None:
+        """Master: a resume at a step that <run>.metrics.jsonl has already logged (a crash resumed from an older
+        periodic checkpoint) replays steps step..L. A W&B run that resumes the same id drops every step below the one it
+        has seen, so its curve keeps the abandoned segment's values for them; metrics.jsonl keeps both segments (the
+        records after the last resume event are the canonical ones)."""
+        if not is_master():
+            return
+        last = last_logged_step(getattr(self, "_metrics_path", None))
+        if last is not None and step <= last:
+            self.main_log(f"{RED}[resume] resuming at step {step}, but steps up to {last} were already logged: steps "
+                          f"{step}..{last} are replayed. A W&B run resumed under the same id drops the replayed steps "
+                          f"(its curve keeps the earlier values for them); {getattr(self.cfg, 'run_name', 'the run')}"
+                          f".metrics.jsonl keeps both segments (the records after the last resume event count){RESET}",
+                          "warning")
 
     def jump_to_step(self, step: int) -> None:
         # batches/epoch is iteration-independent (sampler.num_samples is the full per-rank
@@ -488,27 +914,91 @@ class BaseTrainer:
         self._metrics_event("resume", epoch=epoch, iter_in_epoch=iter_in_epoch)
 
     def resume_routine(self) -> None:
+        """Resume the newest complete checkpoint (the master's decision), after checking the run identity against it
+        (before any state is read). The identity record is written once the state has loaded on every rank, so a load
+        that fails leaves it as it was; a run that starts from scratch records its identity at once."""
         if not self.resume:
             self.main_log("resume disabled: training from scratch", "info")
+            self._check_run_identity(None)
+            self._record_run_identity()
             return
-        found = self.load(self.checkpoint_dir)
-        if found is None:
+        ckpt = self._resume_decision(self.checkpoint_dir)
+        self._check_run_identity(None if ckpt is None else checkpoint_step(ckpt))
+        if ckpt is None:
+            self._record_run_identity()
             self.main_log(f"{RED}No complete checkpoint under {self.checkpoint_dir}; training from scratch{RESET}")
-        else:
-            self.main_log(f"{CYAN}Resumed from {found} at step {self.global_step}{RESET}", "critical")
+            return
+        found = self._load_checkpoint(ckpt)
+        self._record_run_identity()
+        self.main_log(f"{CYAN}Resumed from {found} at step {self.global_step}{RESET}", "critical")
+
+    def _check_run_identity(self, resumed_step: Optional[int]) -> None:
+        """Check <ckpt_dir>/run_identity.json on the master for a resume, or prepare the record of a start from scratch
+        (resumed_step None) (utils/run_identity.py: plan_run_identity). The record to write, if any, stays on the master
+        for _record_run_identity. A refusal is raised on every rank: ResumeRefused when the identity differs
+        (pretrain.train exits 2), a RuntimeError when the record cannot be read. An unexpected error of the check itself
+        is a warning, not a stop: the guard must not become a way to break every chain."""
+        allow = os.environ.get(ALLOW_ENV, "0") == "1"
+        self._identity_record = None
+
+        def check():
+            try:
+                status, msgs, doc = plan_run_identity(self.checkpoint_dir, self.cfg, resumed_step, allow)
+            except Exception as e:  # noqa: BLE001
+                return IDENTITY_OK, [("warning", f"[identity] the run identity could not be checked "
+                                                 f"({type(e).__name__}: {e}); continuing without the check")]
+            self._identity_record = doc          # master only; never broadcast
+            return status, msgs
+
+        status, msgs = self._on_master(check, "checking the run identity")
+        for level, msg in msgs:
+            self.main_log(f"{RED}{msg}{RESET}" if level != "info" else msg, level)
+        if status != IDENTITY_OK:
+            self._identity_record = None
+            raise (ResumeRefused if status == IDENTITY_REFUSED else RuntimeError)(msgs[-1][1])
+
+    def _record_run_identity(self) -> None:
+        """Master: write the run_identity.json that _check_run_identity prepared (none when nothing changed). A failure
+        to write it is a warning only; never raises."""
+        doc, self._identity_record = getattr(self, "_identity_record", None), None
+        if doc is None or not is_master():
+            return
+        try:
+            warning = record_run_identity(self.checkpoint_dir, doc)
+        except Exception as e:  # noqa: BLE001 (a record that cannot be written is recorded by the next resume)
+            warning = f"[identity] could not write the run identity ({type(e).__name__}: {e})"
+        if warning:
+            self.main_log(f"{RED}{warning}{RESET}", "warning")
 
     def _resume_sanity_check(self, feed: dict) -> None:
+        """The first batch after a resume against the one the checkpoint stored for this rank. Every rank's verdict is
+        gathered, so all ranks pass, warn or raise alike (one rank raising alone would leave the others waiting in the
+        step's collectives). A rank whose next_train_data_<rank>.pt is missing or could not be read skips the
+        comparison with a warning: the data position comes from global_step, the file only feeds this check."""
         ref = self.next_train_data_for_check
-        ok = ref is not None and torch.equal(feed["input_ids"].cpu(), ref["input_ids"].cpu())
-        if ok:
-            self.main_log("Resume sanity check PASSED (next batch matches)", "info")
+        note = getattr(self, "_resume_check_note", None)
+        if note is not None or ref is None:
+            mine = ("skipped", note or "no saved next batch")
+        elif torch.equal(feed["input_ids"].cpu(), ref["input_ids"].cpu()):
+            mine = ("ok", "")
         else:
-            msg = "Resume sanity check FAILED (data stream mismatch after resume)"
+            mine = ("failed", "the next batch differs from the one saved with the checkpoint")
+        verdicts = all_gather_objects(mine)
+        failed = [f"rank {r}: {why}" for r, (kind, why) in enumerate(verdicts) if kind == "failed"]
+        skipped = [f"rank {r}: {why}" for r, (kind, why) in enumerate(verdicts) if kind == "skipped"]
+        self.resume_sanity_check_done = True
+        self.next_train_data_for_check = None
+        if failed:
+            msg = "Resume sanity check FAILED (data stream mismatch after resume): " + "; ".join(failed)
             if getattr(self.cfg, "force_resume_check", False):
                 raise RuntimeError(msg)
             self.main_log(f"{RED}{msg}{RESET}", "warning")
-        self.resume_sanity_check_done = True
-        self.next_train_data_for_check = None
+        elif skipped:
+            ok = len(verdicts) - len(skipped)
+            self.main_log(f"{RED}Resume sanity check SKIPPED on {len(skipped)} rank(s) (" + "; ".join(skipped[:4])
+                          + f"); the data position comes from global_step. {ok} rank(s) PASSED{RESET}", "warning")
+        else:
+            self.main_log("Resume sanity check PASSED (next batch matches)", "info")
 
     # ----------------------------------------------------------- logging
     def log_metrics(self, metrics: dict, step: int) -> None:
@@ -553,19 +1043,37 @@ class BaseTrainer:
 
     # ----------------------------------------------------------- main loop
     def train(self) -> str:
-        """Returns "complete" (final checkpoint + export written) or "stopped" (a preemption-safe early stop:
-        a complete checkpoint was saved at the returned step; the caller exits 75 so a relaunch resumes)."""
+        """Returns "complete" (final checkpoint + export written) or "stopped" (a preemption-safe early stop: the
+        newest complete checkpoint holds the state at the returned step; the caller exits 75 so a relaunch resumes).
+        A stop already pending before the first step returns "stopped" at once, without training or saving (the
+        checkpoint just resumed holds this state; a fresh run has nothing to save); a run resumed at max_steps skips
+        that check and exports. The W&B run stays open: the caller closes it after the process group (pretrain.train's
+        _close_and_exit; marked preempting when "stopped")."""
         total_tokens = self.max_steps * self.global_batch_size * self.chunk_size
         self.main_log(
             f"Start training: backend={self.backend} step={self.global_step}/{self.max_steps} "
             f"global_batch={self.global_batch_size} grad_accum={self.gradient_accumulation_steps} "
             f"chunk={self.chunk_size} total_tokens={total_tokens / 1e9:.3f}B", "critical")
         self._metrics_event("start", max_steps=self.max_steps, world=self.num_devices, global_batch=self.global_batch_size,
-                            chunk=self.chunk_size, deadline=(self._deadline or None), resumed=self.global_step > 0)
+                            chunk=self.chunk_size, deadline=(self._deadline or None), resumed=self.global_step > 0,
+                            kernel=(kernel_identity() or {}).get("code_sha"), code=os.environ.get("DM_GIT_REV"))
+        self._train_t0 = time.time()
+        if self.global_step < self.max_steps:
+            # a SIGTERM during the startup or the checkpoint load, or a time budget already spent (a run started late
+            # in a job): one agreed check before the first step, whose compile + autotune alone can take minutes
+            reason = self._stop_now()
+            if reason is not None:
+                held = (f"the checkpoint it resumed from (step {self.global_step}) holds this state"
+                        if self.global_step > 0 else "nothing was trained, so there is nothing to save")
+                self.main_log(f"{RED}Stopping early ({reason}) at step {self.global_step}, before the first step: "
+                              f"{held}; relaunch to resume{RESET}", "critical")
+                self._metrics_event("stop", reason=reason, before_first_step=True)
+                return "stopped"
         with tqdm(total=self.max_steps, initial=self.global_step, desc=f"train[{self.backend}]",
                   disable=not is_master()) as bar:
             while self.global_step < self.max_steps:
                 metrics = self.train_step(grad_clip=self.cfg.opt_cfg.max_grad_norm)
+                self._trained_steps = getattr(self, "_trained_steps", 0) + 1
                 self._log_gains()
                 self._last_metrics = metrics
                 if self.global_step % self.cfg.logging_steps == 0:
@@ -587,14 +1095,19 @@ class BaseTrainer:
                     self.main_log(f"{RED}Stopping early ({reason}) at step {self.global_step}: complete checkpoint saved; "
                                   f"relaunch to resume{RESET}", "critical")
                     self._metrics_event("stop", reason=reason)
-                    self._finish_wandb()
                     return "stopped"
                 dist_barrier()
                 bar.update()
         final_dir = self.checkpoint_dir / CKPT_NAME_FORMAT.format(step=self.global_step)
-        if check_complete_marker(final_dir, self.cfg.VERSION_STRING):
+        # decided on the master: ranks that disagreed here would split between save_ckpt's and save_hf's collectives
+        state = self._on_master(lambda: marker_state_why(final_dir, self.cfg.VERSION_STRING)[0],
+                                f"checking the final checkpoint {final_dir}")
+        if state == COMPLETE:
             self.main_log(f"Final checkpoint {final_dir} already complete (resumed into a finished run); not re-saving")
         else:
+            if state == UNREADABLE:
+                self.main_log(f"{RED}the marker of the final checkpoint {final_dir} cannot be read: saving it again{RESET}",
+                              "warning")
             self.save_ckpt()  # final
         if self.cfg.hf_save_dir:
             self.save_hf(self.cfg.hf_save_dir)
@@ -602,19 +1115,13 @@ class BaseTrainer:
         self.main_log(f"Training complete at step {self.global_step}", "critical")
         self._metrics_event("complete")
         self._dump_result_summary()
-        self._finish_wandb()
         return "complete"
-
-    def _finish_wandb(self) -> None:
-        if is_master() and self.wandb_run is not None:
-            try:
-                self.wandb_run.finish()
-            except Exception as e:  # never crash on a wandb teardown
-                self.main_log(f"[wandb] finish failed: {e}", "warning")
 
     def _dump_result_summary(self) -> None:
         """Durable per-run record (master-only, never crashes the run): write a curated
-        train_summary.json under <result_root_dir or dirname(log_root_dir)/result>/{run_name}/."""
+        train_summary.json under <result_root_dir or dirname(log_root_dir)/result>/{run_name}/ (atomically).
+        final_metrics are the last logged step's; a process that trained no step (it resumed into a finished run and
+        only exported) keeps the run's previous ones: the resumed checkpoint's sidecar, else the existing summary's."""
         if not is_master():
             return
         try:
@@ -622,20 +1129,29 @@ class BaseTrainer:
                 os.path.dirname(str(self.cfg.log_root_dir)), "result")
             result_dir = os.path.join(result_root, self.cfg.run_name)
             os.makedirs(result_dir, exist_ok=True)
+            out_path = os.path.join(result_dir, "train_summary.json")
+            final_metrics = self._last_metrics
+            if not getattr(self, "_trained_steps", 0):
+                final_metrics = (getattr(self, "_resume_state", None) or {}).get("last_metrics") or {}
+                if not final_metrics:
+                    try:
+                        with open(out_path) as fh:
+                            final_metrics = (json.load(fh) or {}).get("final_metrics") or {}
+                    except (OSError, ValueError, AttributeError):
+                        final_metrics = {}
             wandb_run_id = str(self.wandb_run.id) if self.wandb_run is not None else None
             summary = {
                 "run_name": self.cfg.run_name,
                 "wandb_run_id": wandb_run_id,
                 "global_step": self.global_step,
                 "num_steps": self.cfg.num_steps,
-                "final_metrics": self._last_metrics,
+                "final_metrics": final_metrics,
+                "skipped_updates": int(getattr(self, "_nonfinite_steps", 0) or 0),
                 "hf_save_dir": self.cfg.hf_save_dir,
                 "ckpt_dir": str(self.cfg.ckpt_dir),
                 "config": dataclasses.asdict(self.cfg),
             }
-            out_path = os.path.join(result_dir, "train_summary.json")
-            with open(out_path, "w") as fh:
-                json.dump(summary, fh, indent=2, default=str)
+            write_text_atomic(out_path, json.dumps(summary, indent=2, default=str))
             self.main_log(f"Wrote result summary -> {out_path}", "critical")
         except Exception as e:  # never crash the run on a result-dump failure
             self.main_log(f"[result] could not write train_summary.json: {e}", "warning")

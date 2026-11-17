@@ -10,7 +10,8 @@
 #     sm75..sm121. We pin sm90 (Hopper) to cut build time.
 #   * flash-attn is built from the pinned flash-attention commit (see pyproject
 #     [tool.uv.sources]) with FLASH_ATTN_CUDA_ARCHS=90.
-#   * the fp8 attention kernel is the separate delta-matching package, built from its checkout (step 8).
+#   * the fp8 attention kernel is the delta-matching package bundled at kernels/delta-matching (step 8,
+#     scripts/install_kernel.sh; DM_KERNEL_SRC names another checkout).
 #
 # NOTE: mamba-ssm must stay <= 2.3.1 with this torch: 2.3.2.post1 pins apache-tvm-ffi<=0.1.9.
 # NOTE: requires the CUDA forward-compat driver (libcuda.so.1 -> 580.x) for CUDA 13
@@ -29,7 +30,7 @@ fi
 FA_REV="1bda8f9290cd48d030f1516f0e680cd464ef3554"
 CC1D_V="1.7.0"
 MAMBA_V="2.3.1"
-DM_KERNEL_SRC="${DM_KERNEL_SRC:-}"          # a checkout of the delta-matching repository (the fp8 attention kernel)
+DM_KERNEL_SRC="${DM_KERNEL_SRC:-$REPO/kernels/delta-matching}"   # the fp8 attention kernel: the bundled one by default
 
 export VIRTUAL_ENV="$REPO/.venv"
 export TMPDIR="$BUILD"
@@ -111,13 +112,19 @@ fi
 echo "==> [8/8] this repository (editable) + the delta-matching kernel package"
 uv pip install --no-build-isolation --no-deps -e "$REPO"
 if [ -n "$DM_KERNEL_SRC" ] && [ -f "$DM_KERNEL_SRC/setup.py" ]; then
-    # the fp8 attention kernel (Delta-Matching-128 / -256, sm_90a; a few minutes with MAX_JOBS=16); DM_BF16_DP=1 in the
-    # environment builds the bf16_dp variant instead (one build = one binary; see the package's README)
-    ( cd "$DM_KERNEL_SRC" && MAX_JOBS="${MAX_JOBS}" uv pip install --no-build-isolation . )
+    # the fp8 attention kernel (Delta-Matching-128 / -256, sm_90a; a few minutes with MAX_JOBS=16): the bundled
+    # kernels/delta-matching unless DM_KERNEL_SRC names another checkout; DM_BF16_DP=1 in the environment builds the
+    # bf16_dp variant instead (one build = one binary; see the package's README). install_kernel.sh fetches the pinned
+    # flash-attention headers, installs with pip into this venv and checks the installed build's source hash.
+    # its own flash-attention checkout at the kernel's pins ($BUILD/flash-attention is at FA_REV for the FA2/FA3 builds)
+    if ! DM_PY="$VIRTUAL_ENV/bin/python" DM_KERNEL_SRC="$DM_KERNEL_SRC" DM_FA_SRC="$BUILD/flash-attention-dm" \
+         MAX_JOBS="${MAX_JOBS}" "$REPO/scripts/install_kernel.sh"; then
+        echo "WARN: the delta-matching kernel build failed (scripts/install_kernel.sh); the fp8 arms need it"
+    fi
 else
-    echo "NOTE: the delta-matching kernel package was not installed (set DM_KERNEL_SRC=/path/to/delta-matching checkout"
-    echo "      and rerun, or install it by hand: cd <checkout> && MAX_JOBS=16 pip install --no-build-isolation .;"
-    echo "      docs/SETUP.md section 3). The fp8 arms need it; the bf16 arms and the evaluation do not."
+    echo "NOTE: the delta-matching kernel package was not installed: DM_KERNEL_SRC=$DM_KERNEL_SRC is not a checkout"
+    echo "      (scripts/install_kernel.sh builds the bundled kernels/delta-matching; docs/SETUP.md section 3)."
+    echo "      The fp8 arms need it; the bf16 arms and the evaluation do not."
 fi
 
 echo

@@ -7,6 +7,7 @@ directory. No data is shipped: several sources forbid redistribution (see Terms)
 |---|---|
 | [`pretrain_stage1.md`](pretrain_stage1.md) | the stage-1 (pretraining) corpus: Nemotron-CC-v2.1 High-Quality + High-Quality-DQA, Llama-2 ids |
 | [`pretrain_stage2.md`](pretrain_stage2.md) | the stage-2 (context extension) corpus: ProLong's long-context data re-tokenized with Llama-2, 65,536-token windows |
+| [`pretrain_finepdfs_edu.md`](pretrain_finepdfs_edu.md) | an alternative pretraining corpus (optional): 60 B tokens of English FinePDFs-Edu, quality-filtered and sampled at random, Llama-2 ids in the stage-1 format |
 | `docs/benchmark.md` | the evaluation protocol that reads the evaluation data |
 
 ## Building the data root
@@ -27,6 +28,7 @@ they use) and a Hugging Face login with access to three gated repositories: acce
     python data/build_stage1.py   --root $DM_DATA_ROOT       # nemotron_cc_v2d1_hq_dqa/   (every stage-1 experiment)
     python data/build_stage2.py   --root $DM_DATA_ROOT       # prolong_64k_llama2/        (scripts/experiments/stage2_context.sh only)
     python data/prepare_eval.py   --root $DM_DATA_ROOT       # ruler-500-llama2/ and hf_cache/ (the evaluation)
+    python -I data/build_finepdfs_edu.py --root $DM_DATA_ROOT  # finepdfs_edu_en_60b/ (optional; public data, no login)
     python data/verify.py         --root $DM_DATA_ROOT       # sizes + sha256 of everything (--part: only what you built)
 
 Each build ends by checking its outputs against `checksums.json` and fails loudly on a difference; each step can be run
@@ -52,6 +54,26 @@ slower but not different: the outputs do not depend on the number of processes.
   definitions from the Hugging Face Hub; `scripts/campaign/env.sh` points `HF_HOME` at it. These have no checksums
   (the layout is the datasets library's); `verify.py` checks that the cache is there.
 
+## The FinePDFs-Edu corpus (optional)
+
+`finepdfs_edu_en_60b/` is an alternative pretraining corpus in the stage-1 format (`pretrain_finepdfs_edu.md`):
+English FinePDFs-Edu PDF text, quality-filtered and sampled at random by document, in Llama-2 ids. The build of
+2026-11-09 (job 21596272, 2 h 08 min on one 80-CPU cpu_datamover node) holds 60,000,005,485 training tokens in
+10,162,083 documents and 800,016,252 held-out tokens in 136,211 documents: 122 GB, plus the 299 GB of source parquet
+kept in `raw/finepdfs-edu/`. Its own `README.md` gives the filters, counts and provenance, and its `manifest.json` gives
+everything else. On this cluster it is `workspace/data/finepdfs_edu_en_60b/`, which is
+`dm-workspace/data/finepdfs_edu_en_60b/`.
+
+To train a stage-1 arm on it, override two keys; no code change is needed. dtype `uint16`, `position_mode: packed` and
+`data.seed` stay as in the yaml:
+
+    FP=$DM_DATA_ROOT/finepdfs_edu_en_60b
+    --data.paths $FP/finepdfs_edu_en_train.bin --data.doc_lengths $FP/finepdfs_edu_en_train.doc_lengths.npy
+
+At global batch 128 x 8,192, one epoch of the training stream is 57,220 steps (59,999,518,720 tokens).
+`pretrain_finepdfs_edu.md` ("Training on it") has the launcher command and its pitfalls: `TAG` is mandatory, and the
+end-of-run val CE still scores the Nemotron stream.
+
 ## Terms
 
 The code license does not cover the data. What you build is subject to the terms of its sources:
@@ -65,6 +87,10 @@ The code license does not cover the data. What you build is subject to the terms
 - The Llama 2 tokenizer (every part, and baked into every model export): the Llama 2 Community License. The Llama 3
   tokenizer (stage-2 build only): the Llama 3 Community License.
 - The evaluation datasets: the license on each dataset card.
+- `HuggingFaceFW/finepdfs-edu` (the optional FinePDFs-Edu corpus, `pretrain_finepdfs_edu.md`): the Open Data Commons
+  Attribution License (ODC-By) v1.0, which requires attribution, and the CommonCrawl Terms of Use. It contains
+  copyrighted documents and possibly personal information; its card links an opt-out / PII removal form. The
+  tokenized corpus carries the Llama 2 tokenizer's ids (Llama 2 Community License). Build it locally.
 
 Build the data yourself; do not re-publish it.
 
@@ -77,3 +103,5 @@ Build the data yourself; do not re-publish it.
 | `build_stage2.py`, `stage2_repack.py`, `stage2_val.py` | the stage-2 corpus (`pretrain_stage2.md`) |
 | `prepare_eval.py` | RULER and the lm-eval datasets |
 | `verify.py`, `checksums.json` | the size and sha256 of every file the builds produce (122 files) |
+| `build_finepdfs_edu.py`, `finepdfs_tokenize.py`, `finepdfs_select.py`, `finepdfs_edu_files.json` | the optional FinePDFs-Edu corpus (`pretrain_finepdfs_edu.md`) and its pinned input files |
+| `finepdfs_edu_checksums.json` | the size and sha256 of its four streams, written by its first default build; not in `checksums.json` and not read by `verify.py` (`build_finepdfs_edu.py --step verify` checks it) |

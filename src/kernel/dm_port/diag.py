@@ -21,6 +21,10 @@ WHAT IT MEASURES, and why each quantity is the right one.
                  gradient that actually reaches the optimizer, quantization floor included.
   dv_commonmode = the same statistic on dv, as a NEGATIVE CONTROL: dV_j = sum_i P_ij dO_i contains no
                  dS at all, so the violation cannot reach it and this must not separate the arms.
+  eps_aux      = delta_matched - delta_aux (dm_mode aux_out, kernel/dm_port/aux_out.py): the residual the
+                 auxiliary-output delta rowsum(dequant(dO8) * O') leaves, with O' = bf16(P) @ V-hat computed in the
+                 forward.  The aux_out arm's own residual; on the other arms a counterfactual (O' is computed on the
+                 logged microbatches only).  On the aux_out arm force_aux_* is gain_force() with eps_aux.
 
   The point of saving the common-mode VECTOR and not just its norm is coherence.  A per-step ratio of
   ~1.7 between the arms is not what kills training; what matters is whether the excess points the same
@@ -123,7 +127,8 @@ def begin(layer: int) -> bool:
 
 
 @torch.no_grad()
-def record(layer: int, *, dk, dv, dq, eps, q8, lse=None, rows=None, kdc=None, qdc=None, force=None) -> None:
+def record(layer: int, *, dk, dv, dq, eps, q8, lse=None, rows=None, kdc=None, qdc=None, force=None,
+           eps_aux=None, force_aux=None, dlt_matched=None) -> None:
     """dk/dv are the kernel's own (B, N, H, D) grads BEFORE the n_rep fold; eps is (B*H, N) true units."""
     if not ENABLED:
         return
@@ -143,6 +148,19 @@ def record(layer: int, *, dk, dv, dq, eps, q8, lse=None, rows=None, kdc=None, qd
                              torch.tensor([0.5, 0.9, 0.99, 0.999], device=e.device)).cpu(),
         dq_norm=dq.detach().float().norm().cpu(), dk_norm=dk.detach().float().norm().cpu(),
     )
+    qs = torch.tensor([0.5, 0.9, 0.99, 0.999], device=e.device)
+    if dlt_matched is not None:                  # the scale the residuals are read against
+        dm_ = dlt_matched.detach().float()
+        rec["dlt_matched_rms"] = dm_.pow(2).mean().sqrt().cpu()
+        rec["dlt_matched_absq"] = torch.quantile(dm_.abs().flatten(), qs).cpu()
+    if eps_aux is not None:
+        ea = eps_aux.detach().float()
+        rec["eps_aux_rms"] = ea.pow(2).mean().sqrt().cpu()
+        rec["eps_aux_absmax"] = ea.abs().max().cpu()
+        rec["eps_aux_q"] = torch.quantile(ea.abs().flatten(), qs).cpu()
+        rec["eps_aux_mean"] = ea.mean().cpu()    # a systematic sign would show here
+    if force_aux is not None:
+        rec.update({k + "_aux": v for k, v in force_aux.items() if k in ("force_cr", "force_ok", "n_crushed")})
     if kdc is not None:
         # The mechanism's fingerprint in ACTIVATION space: a coherent common-mode in dK adds a shared
         # constant vector to every key, so the key cloud acquires a DC component. ||mean_t k_t|| / rms(k)

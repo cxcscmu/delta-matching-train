@@ -126,7 +126,8 @@ class ModelConfig:
     # dm_mode is the backward's delta realization: "stale" (delta = rowsum(dO * O) from the forward's O, the naive
     # fp8 backward), "matched" (delta from the backward's own realized fp8 P / dP pair: Delta-Matching) or "bf16_dp"
     # (the stale delta with the dP matmul kept in bf16, the paper's bf16-dP arm; needs the delta_matching kernel built with
-    # DM_BF16_DP=1, checked at model build; the dm mixer only, head_dim 128 only).
+    # DM_BF16_DP=1, checked at model build; the dm mixer only, head_dim 128 only) or "aux_out" (Attn-QAT's auxiliary-
+    # output delta rowsum(dequant(dO8) * O'), O' = bf16(P) @ V-hat saved by the forward; the dm mixer only; a baseline).
     dm_mode: str = "matched"
     # The dm mixer's fused fp8 producers (the only realization of that mixer; kept for the launch contract and the
     # configs of the study, which set it explicitly). The plain kernel route is the gqa mixer with attn_impl 'dm'.
@@ -147,7 +148,8 @@ class ModelConfig:
             self.intermediate_size = int(((int(raw) + m - 1) // m) * m)
         assert 0.0 < self.partial_rotary_factor <= 1.0, (
             f"partial_rotary_factor must be in (0, 1], got {self.partial_rotary_factor}")
-        assert self.dm_mode in ("stale", "matched", "bf16_dp"), f"dm_mode must be stale|matched|bf16_dp, got {self.dm_mode!r}"
+        assert self.dm_mode in ("stale", "matched", "bf16_dp", "aux_out"), \
+            f"dm_mode must be stale|matched|bf16_dp|aux_out, got {self.dm_mode!r}"
         assert self.rotary_dim % 2 == 0 and self.rotary_dim > 0, (
             f"rotary_dim = head_dim({self.head_dim}) * partial_rotary_factor"
             f"({self.partial_rotary_factor}) = {self.rotary_dim}, which must be a positive even number")

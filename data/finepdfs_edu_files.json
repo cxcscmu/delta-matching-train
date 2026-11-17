@@ -1,0 +1,722 @@
+{
+ "about": "The input of data/build_finepdfs_edu.py (data/pretrain_finepdfs_edu.md): every parquet file of the eng_Latn config of the Hugging Face dataset HuggingFaceFW/finepdfs-edu at a pinned revision, with its byte size, LFS sha256 and parquet footer counts (rows, row groups). Every downloaded file is checked against this listing.",
+ "repo": "HuggingFaceFW/finepdfs-edu",
+ "repo_type": "dataset",
+ "revision": "9cfabe2127faca99b3d5c4dc6d1fcb397399ebde",
+ "revision_date": "2025-11-11",
+ "base_card": {
+  "repo": "HuggingFaceFW/finepdfs",
+  "revision": "220bac3acbf07789502c621d2d33952f51ac7f86"
+ },
+ "config": "eng_Latn",
+ "split": "train",
+ "license": "ODC-By 1.0; use also subject to the CommonCrawl Terms of Use",
+ "totals": {
+  "files": 100,
+  "bytes": 298670229506,
+  "rows": 23023372,
+  "row_groups": 23074
+ },
+ "files": [
+  {
+   "path": "data/eng_Latn/train/000_00000.parquet",
+   "bytes": 3081370704,
+   "sha256": "39d9dd3532e51f7828f762d8b7bd31cc1b3fe8063ae3a3a260169b1fe4ac2dc8",
+   "rows": 236144,
+   "row_groups": 237
+  },
+  {
+   "path": "data/eng_Latn/train/000_00001.parquet",
+   "bytes": 3213362484,
+   "sha256": "212201926f6fefb3c5035b419a228bcf77a7a79c12afbc0f10e7076acac53e62",
+   "rows": 239573,
+   "row_groups": 240
+  },
+  {
+   "path": "data/eng_Latn/train/000_00002.parquet",
+   "bytes": 3085492525,
+   "sha256": "e9771b2b89a3e4934e42af909c0c7cc51f48b6de621589682c040af7cdf37122",
+   "rows": 236024,
+   "row_groups": 237
+  },
+  {
+   "path": "data/eng_Latn/train/000_00003.parquet",
+   "bytes": 3121441107,
+   "sha256": "216ef6bb956508a253f20ca612e6e21eed3ecc93510d884a5aa5b9cbc7d56399",
+   "rows": 236753,
+   "row_groups": 237
+  },
+  {
+   "path": "data/eng_Latn/train/000_00004.parquet",
+   "bytes": 3154335763,
+   "sha256": "4c2cb3dedc718ac54effd836f2254b619b060c5127d2b1ae8c761593ea0e1fdf",
+   "rows": 236594,
+   "row_groups": 237
+  },
+  {
+   "path": "data/eng_Latn/train/000_00005.parquet",
+   "bytes": 3012756642,
+   "sha256": "256b49ed089270f5a854dc6757bff0a754b2ccb06766bfb93fabf12890b82a8e",
+   "rows": 235500,
+   "row_groups": 236
+  },
+  {
+   "path": "data/eng_Latn/train/000_00006.parquet",
+   "bytes": 3120561399,
+   "sha256": "841f9b0e7ba0c15ae9cac4837b8797f1c3f99e8fc596c5de9a9af08c2f0b33dd",
+   "rows": 237979,
+   "row_groups": 238
+  },
+  {
+   "path": "data/eng_Latn/train/000_00007.parquet",
+   "bytes": 3130831545,
+   "sha256": "5f5bf8ecc9e09c0a859a486d260191f722e628332231e18694f29004ec443244",
+   "rows": 236429,
+   "row_groups": 237
+  },
+  {
+   "path": "data/eng_Latn/train/000_00008.parquet",
+   "bytes": 3074131658,
+   "sha256": "9c249ff46e3cbc8511af063dd9e35358bc75ce5ab959016e38970923ab2ae539",
+   "rows": 237139,
+   "row_groups": 238
+  },
+  {
+   "path": "data/eng_Latn/train/000_00009.parquet",
+   "bytes": 3108436207,
+   "sha256": "b5cf14eaaf4aa94eb21c31e47b54786626255b17b55247961d93d3a7ef68415f",
+   "rows": 237447,
+   "row_groups": 238
+  },
+  {
+   "path": "data/eng_Latn/train/000_00010.parquet",
+   "bytes": 3081324457,
+   "sha256": "5b862931bb0f8e99becdb136dee1e5a1091a8ced5fe748eaa65fdd3d2b26c6df",
+   "rows": 235406,
+   "row_groups": 236
+  },
+  {
+   "path": "data/eng_Latn/train/000_00011.parquet",
+   "bytes": 3058955640,
+   "sha256": "80dbcaa678b12d5d1b8f094afb28bcf6ff25a9d45a6271d8f578e6a97fe98fee",
+   "rows": 236241,
+   "row_groups": 237
+  },
+  {
+   "path": "data/eng_Latn/train/000_00012.parquet",
+   "bytes": 3061956514,
+   "sha256": "763b48522a54b755223f174d44a4178268a52b92f4da610b8cd96b4fe5927346",
+   "rows": 237278,
+   "row_groups": 238
+  },
+  {
+   "path": "data/eng_Latn/train/000_00013.parquet",
+   "bytes": 2979653296,
+   "sha256": "81b3c7d1c59bfe369d484927843685e1ac2cec9a81df033cbd8b7d272fc054a8",
+   "rows": 235160,
+   "row_groups": 236
+  },
+  {
+   "path": "data/eng_Latn/train/000_00014.parquet",
+   "bytes": 3142273921,
+   "sha256": "d73be057b038a157f43a975f5cd56bf5728899e3bd64e016420aa870482a57c7",
+   "rows": 234293,
+   "row_groups": 235
+  },
+  {
+   "path": "data/eng_Latn/train/000_00015.parquet",
+   "bytes": 3129079460,
+   "sha256": "dc04c35d1b57d414e9f139b336e02e9c1357dfe58d1e33c91b91cb496af529bb",
+   "rows": 235147,
+   "row_groups": 236
+  },
+  {
+   "path": "data/eng_Latn/train/000_00016.parquet",
+   "bytes": 3062715556,
+   "sha256": "54ff282768e52323f964baeb693dbbf04361ed203ef8afb221e44fe24e5f38ee",
+   "rows": 234821,
+   "row_groups": 235
+  },
+  {
+   "path": "data/eng_Latn/train/000_00017.parquet",
+   "bytes": 3070574935,
+   "sha256": "0df78f9480df395486ebfe9bfa5f32a11b1402a65569d50f8aee427bcaf8a5f9",
+   "rows": 233195,
+   "row_groups": 234
+  },
+  {
+   "path": "data/eng_Latn/train/000_00018.parquet",
+   "bytes": 3162292498,
+   "sha256": "b969c0865efa161c03d1633d877cf55af789d7adcde4c15f1faa229645b540f0",
+   "rows": 236800,
+   "row_groups": 237
+  },
+  {
+   "path": "data/eng_Latn/train/000_00019.parquet",
+   "bytes": 3072102076,
+   "sha256": "e9f6a9135e44329d512323e93bd4072b0d3327fa533dfd716ee1a1c8b37f85f7",
+   "rows": 233399,
+   "row_groups": 234
+  },
+  {
+   "path": "data/eng_Latn/train/000_00020.parquet",
+   "bytes": 3106032795,
+   "sha256": "7f555e775dbb7eb808c8de85bd2a1e878ae7f250208a54e1aa9fff088a7dea66",
+   "rows": 236750,
+   "row_groups": 237
+  },
+  {
+   "path": "data/eng_Latn/train/000_00021.parquet",
+   "bytes": 3183544157,
+   "sha256": "99c71829357cbe5a4ad4b3e4f5b10ecea60e6818f845fd06a558b6116474cfcf",
+   "rows": 235882,
+   "row_groups": 236
+  },
+  {
+   "path": "data/eng_Latn/train/000_00022.parquet",
+   "bytes": 3106919244,
+   "sha256": "b33dba5fa5a3086d34c0decc76ca6e3f1f794850037eec019005557090d7c3c2",
+   "rows": 234423,
+   "row_groups": 235
+  },
+  {
+   "path": "data/eng_Latn/train/000_00023.parquet",
+   "bytes": 3069653778,
+   "sha256": "52d80d74c7e81d1a221539b228399bbcf4871ab58372c344ca3e5d08983a5a28",
+   "rows": 233702,
+   "row_groups": 234
+  },
+  {
+   "path": "data/eng_Latn/train/000_00024.parquet",
+   "bytes": 3065876283,
+   "sha256": "fb732b5035ed96f80d70531c1c8b3cd59b3751d7e288839340abb0afbbb9d36d",
+   "rows": 235755,
+   "row_groups": 236
+  },
+  {
+   "path": "data/eng_Latn/train/000_00025.parquet",
+   "bytes": 3058350215,
+   "sha256": "e6d4f68b2f90d0f80d9b604735bddcb76e71242f29d0337094fd40d10c272904",
+   "rows": 234439,
+   "row_groups": 235
+  },
+  {
+   "path": "data/eng_Latn/train/000_00026.parquet",
+   "bytes": 2998653847,
+   "sha256": "06adc8025b9012ccebde81225407b8adc934d65d8f953c461df8fd068bd29b7c",
+   "rows": 232456,
+   "row_groups": 233
+  },
+  {
+   "path": "data/eng_Latn/train/000_00027.parquet",
+   "bytes": 3004871154,
+   "sha256": "2f2e2332f26430a4af61896b4c73eabea70c59ab25de7d40b959edec7faac367",
+   "rows": 233655,
+   "row_groups": 234
+  },
+  {
+   "path": "data/eng_Latn/train/000_00028.parquet",
+   "bytes": 3036835265,
+   "sha256": "7b81948c3d06bf01bf90af97367595aabdc6fc16ccef649c6c9dc390add05a88",
+   "rows": 233542,
+   "row_groups": 234
+  },
+  {
+   "path": "data/eng_Latn/train/000_00029.parquet",
+   "bytes": 2958914538,
+   "sha256": "f89e418427e0d19b05cec256facb443a20f9c89e539833618ba316083c69e165",
+   "rows": 233072,
+   "row_groups": 234
+  },
+  {
+   "path": "data/eng_Latn/train/000_00030.parquet",
+   "bytes": 2985521337,
+   "sha256": "05917cc903fbd97cdac988a7045bf48ae9891dc1a6aba5638f16f02e9b323518",
+   "rows": 232051,
+   "row_groups": 233
+  },
+  {
+   "path": "data/eng_Latn/train/000_00031.parquet",
+   "bytes": 3045214079,
+   "sha256": "c485b373b213049c28585c1ef033f04dc2f73944ca51fcbc14ba104d6625a668",
+   "rows": 235338,
+   "row_groups": 236
+  },
+  {
+   "path": "data/eng_Latn/train/000_00032.parquet",
+   "bytes": 2996840561,
+   "sha256": "0ad09064d65700b063ad97702175afaa747b5745397c1aa4616221eda9dd511a",
+   "rows": 232434,
+   "row_groups": 233
+  },
+  {
+   "path": "data/eng_Latn/train/000_00033.parquet",
+   "bytes": 2918362916,
+   "sha256": "002f929024546b13c5a17a7a3109ae9cebb2d64ec3b525feac94f1f286901d68",
+   "rows": 230504,
+   "row_groups": 231
+  },
+  {
+   "path": "data/eng_Latn/train/000_00034.parquet",
+   "bytes": 3067667936,
+   "sha256": "2fec215a75c5f44af2f7a40e3a5ce99b5c4f4a27f4bfd084e170a8ef825d9eb3",
+   "rows": 233591,
+   "row_groups": 234
+  },
+  {
+   "path": "data/eng_Latn/train/000_00035.parquet",
+   "bytes": 3060820154,
+   "sha256": "f44d301f28d1b1c9ff03a66080d5b81e7fbcc25b9f378771e9caaa66392e1837",
+   "rows": 232872,
+   "row_groups": 233
+  },
+  {
+   "path": "data/eng_Latn/train/000_00036.parquet",
+   "bytes": 2999833647,
+   "sha256": "4220fc506f8a2499765d89ce8f42f4b9b5d2ba8c427e682291a8619a482d2a0c",
+   "rows": 233138,
+   "row_groups": 234
+  },
+  {
+   "path": "data/eng_Latn/train/000_00037.parquet",
+   "bytes": 3078585353,
+   "sha256": "bb98814de52fec890d07ab85d0f78057c39e1e430d87e8dbd186eae18818258c",
+   "rows": 232820,
+   "row_groups": 233
+  },
+  {
+   "path": "data/eng_Latn/train/000_00038.parquet",
+   "bytes": 2976497136,
+   "sha256": "0793363653b5937c71d81f9ce98f6ad035a90b6d1b4f6e387fb48d3524e36047",
+   "rows": 231984,
+   "row_groups": 232
+  },
+  {
+   "path": "data/eng_Latn/train/000_00039.parquet",
+   "bytes": 3076759939,
+   "sha256": "7431bd61ebd9884e26756f32b01820dba26e6831d242fe965fc59c16e4535d3e",
+   "rows": 235387,
+   "row_groups": 236
+  },
+  {
+   "path": "data/eng_Latn/train/000_00040.parquet",
+   "bytes": 2989719484,
+   "sha256": "76cbf2fe2b36d5cceeb6812ccd6355b355374b1b1cb12c6f9bf701f3ce762648",
+   "rows": 232320,
+   "row_groups": 233
+  },
+  {
+   "path": "data/eng_Latn/train/000_00041.parquet",
+   "bytes": 3016840823,
+   "sha256": "ad6640e52b7b1c5811f21a0ebc409f2ab32404f7701b94659dba1c8adbd5a8d9",
+   "rows": 233810,
+   "row_groups": 234
+  },
+  {
+   "path": "data/eng_Latn/train/000_00042.parquet",
+   "bytes": 3020393460,
+   "sha256": "74aa78327a05e16c8812b3b6064716d559a929050d77efbde0cc445a75cea29b",
+   "rows": 231187,
+   "row_groups": 232
+  },
+  {
+   "path": "data/eng_Latn/train/000_00043.parquet",
+   "bytes": 2977822066,
+   "sha256": "b1ee7f0c45d278d0be764625b250eb48ecedf8eb15dacc742bc146467063187c",
+   "rows": 233533,
+   "row_groups": 234
+  },
+  {
+   "path": "data/eng_Latn/train/000_00044.parquet",
+   "bytes": 3024336658,
+   "sha256": "202ba65a11100df7100db1a41fb1b8c1c40ebfcc2be608a59a30109bbfbc5e5b",
+   "rows": 231543,
+   "row_groups": 232
+  },
+  {
+   "path": "data/eng_Latn/train/000_00045.parquet",
+   "bytes": 2929067338,
+   "sha256": "f328b24e9240e73782618eb38faac37e6069ca679803afecd69a28ad072dc499",
+   "rows": 232079,
+   "row_groups": 233
+  },
+  {
+   "path": "data/eng_Latn/train/000_00046.parquet",
+   "bytes": 3009617720,
+   "sha256": "02574c4dd2545e91591d4477af11a023053c38dce5d6a58e573e87ca3348c13d",
+   "rows": 232372,
+   "row_groups": 233
+  },
+  {
+   "path": "data/eng_Latn/train/000_00047.parquet",
+   "bytes": 3025485875,
+   "sha256": "47d21ecb5ea82f222c93523be2e91ee2fd6fdd26997898b2b9d5b00872c8ffdd",
+   "rows": 233217,
+   "row_groups": 234
+  },
+  {
+   "path": "data/eng_Latn/train/000_00048.parquet",
+   "bytes": 3053867962,
+   "sha256": "3b4fa666ee89038e590e457757ed144d93d6f7d13fb36c96d803b694547900d6",
+   "rows": 231000,
+   "row_groups": 231
+  },
+  {
+   "path": "data/eng_Latn/train/000_00049.parquet",
+   "bytes": 3007129266,
+   "sha256": "1cc5a0f05b2ab75aae85148d5b3f347e8ddb57adf39aa91c45726de637a57bf6",
+   "rows": 230367,
+   "row_groups": 231
+  },
+  {
+   "path": "data/eng_Latn/train/000_00050.parquet",
+   "bytes": 2973677348,
+   "sha256": "82bc5d965d06f1ec329901561cbcc2ad2a3a80d9fcebdb63b352e865d5212b91",
+   "rows": 232297,
+   "row_groups": 233
+  },
+  {
+   "path": "data/eng_Latn/train/000_00051.parquet",
+   "bytes": 3029886673,
+   "sha256": "31d0cafbaa169d2d065e4b26c44e664ac503f10658c938333a36c3ac551d275a",
+   "rows": 232381,
+   "row_groups": 233
+  },
+  {
+   "path": "data/eng_Latn/train/000_00052.parquet",
+   "bytes": 2978696564,
+   "sha256": "5dc9321a99e8956baac2e74035a5377f34e973f52ad9ec8a3a6b4692e047f118",
+   "rows": 230294,
+   "row_groups": 231
+  },
+  {
+   "path": "data/eng_Latn/train/000_00053.parquet",
+   "bytes": 3050699850,
+   "sha256": "1f00d4e3550b7822bf1ad01a5d1db718251ae05dd283409adedd544cec4d3d0b",
+   "rows": 234418,
+   "row_groups": 235
+  },
+  {
+   "path": "data/eng_Latn/train/000_00054.parquet",
+   "bytes": 3041390468,
+   "sha256": "e824d02e9f668f8dc539a43f38dd2ceab9ba8fbce5569093c5824ddf3cf31c92",
+   "rows": 232489,
+   "row_groups": 233
+  },
+  {
+   "path": "data/eng_Latn/train/000_00055.parquet",
+   "bytes": 3010756040,
+   "sha256": "32dbd56c285f0cbfb8f4f65baef574d92eeee802c7ee93cef7051b9c4f5b173e",
+   "rows": 230166,
+   "row_groups": 231
+  },
+  {
+   "path": "data/eng_Latn/train/000_00056.parquet",
+   "bytes": 3069167195,
+   "sha256": "c4f8a0d513012489b94ae51b4359c9d9899c7a428bf5b27ffcbff0ca952b3936",
+   "rows": 231394,
+   "row_groups": 232
+  },
+  {
+   "path": "data/eng_Latn/train/000_00057.parquet",
+   "bytes": 2955475193,
+   "sha256": "32cc7257c2396c8efa76d98daeb290b17e157e2e9938d82674b13cafbdf8d7c9",
+   "rows": 231546,
+   "row_groups": 232
+  },
+  {
+   "path": "data/eng_Latn/train/000_00058.parquet",
+   "bytes": 3012984523,
+   "sha256": "8c4b27fd3ba37910d8de492d79717aad90f8244a4c5e333134f58eab6eb31fc0",
+   "rows": 233613,
+   "row_groups": 234
+  },
+  {
+   "path": "data/eng_Latn/train/000_00059.parquet",
+   "bytes": 3036847497,
+   "sha256": "93055ae3d77aa8bdb92bf370db449cc7fb415e4b77b2a6b1008e4ed322fcc8ae",
+   "rows": 232475,
+   "row_groups": 233
+  },
+  {
+   "path": "data/eng_Latn/train/000_00060.parquet",
+   "bytes": 2949402235,
+   "sha256": "6c02c563fe15369ee3971402c5246444e96d2f830d06c5e0ddd71509c269fe90",
+   "rows": 230236,
+   "row_groups": 231
+  },
+  {
+   "path": "data/eng_Latn/train/000_00061.parquet",
+   "bytes": 2959500515,
+   "sha256": "539cac268b3a3955d605d702467a500e4bb4de5340a1fd6cde5638d5b936f72f",
+   "rows": 228267,
+   "row_groups": 229
+  },
+  {
+   "path": "data/eng_Latn/train/000_00062.parquet",
+   "bytes": 2927530869,
+   "sha256": "cc2f63dd2f59ff7fd6845acaa8ccd01394f605a7e800d692d8ff38ce4fdb822e",
+   "rows": 228466,
+   "row_groups": 229
+  },
+  {
+   "path": "data/eng_Latn/train/000_00063.parquet",
+   "bytes": 2903941951,
+   "sha256": "3b6c2b6234cf663d086c37714419a67733b2120b0a5c32ed7a70e417ea4d70ef",
+   "rows": 228549,
+   "row_groups": 229
+  },
+  {
+   "path": "data/eng_Latn/train/000_00064.parquet",
+   "bytes": 2965122989,
+   "sha256": "452dc25c054b3d1ded3ec6defb38b6afe10602e6a8b7500e9eebbea0cf7d5dac",
+   "rows": 228683,
+   "row_groups": 229
+  },
+  {
+   "path": "data/eng_Latn/train/000_00065.parquet",
+   "bytes": 2999580811,
+   "sha256": "b1f28cb0c492334daabebc440f5e1bca9bfba0d5b8efcec4dfae0fb853acd3d4",
+   "rows": 229880,
+   "row_groups": 230
+  },
+  {
+   "path": "data/eng_Latn/train/000_00066.parquet",
+   "bytes": 2989502078,
+   "sha256": "8a03b024ec1d97d01a7286dd000eea0b100d1daedd22694db4373c2eec1268e3",
+   "rows": 225676,
+   "row_groups": 226
+  },
+  {
+   "path": "data/eng_Latn/train/000_00067.parquet",
+   "bytes": 2948648120,
+   "sha256": "7d46ac410cf197a5b2d9728a116e1a1c68bb6f3549bf7ea8c5ee96881651a448",
+   "rows": 230712,
+   "row_groups": 231
+  },
+  {
+   "path": "data/eng_Latn/train/000_00068.parquet",
+   "bytes": 2969432893,
+   "sha256": "f90012e365c25ac371a4d9e5b73d4e420f0b258a5e68f733674c98acac9aa350",
+   "rows": 230408,
+   "row_groups": 231
+  },
+  {
+   "path": "data/eng_Latn/train/000_00069.parquet",
+   "bytes": 2922098215,
+   "sha256": "4610eca4fb363248adb628539bd2180342f0f52d795a632ecc6878dc8e9d4c59",
+   "rows": 226672,
+   "row_groups": 227
+  },
+  {
+   "path": "data/eng_Latn/train/000_00070.parquet",
+   "bytes": 2944006193,
+   "sha256": "47bdc1d8b560712d615ba561f9bdbc22a700005f24a67b03e0b6bc10a0e13fbe",
+   "rows": 228656,
+   "row_groups": 229
+  },
+  {
+   "path": "data/eng_Latn/train/000_00071.parquet",
+   "bytes": 2962693773,
+   "sha256": "c33e330f4378011e2869d6adbd99d272673cf17437d7532fafad79531237e50b",
+   "rows": 228428,
+   "row_groups": 229
+  },
+  {
+   "path": "data/eng_Latn/train/000_00072.parquet",
+   "bytes": 2917505151,
+   "sha256": "792dbcd8f33732949ef652e55ea32a4eddb2df3a81d8305f0338692ff3bc6d6d",
+   "rows": 226836,
+   "row_groups": 227
+  },
+  {
+   "path": "data/eng_Latn/train/000_00073.parquet",
+   "bytes": 2972652633,
+   "sha256": "f4d028e7cba8bf360dbcc7776f3de8ea75ae744e0086549245edfcd578e8ee9f",
+   "rows": 230552,
+   "row_groups": 231
+  },
+  {
+   "path": "data/eng_Latn/train/000_00074.parquet",
+   "bytes": 3006995783,
+   "sha256": "cfb79620d1047e7332d72fff196f51fb8b7c30267c61f04758046851a8be8f40",
+   "rows": 228387,
+   "row_groups": 229
+  },
+  {
+   "path": "data/eng_Latn/train/000_00075.parquet",
+   "bytes": 2909041802,
+   "sha256": "7833c86d6ee84b43750ff21e69923b0601c3457e16308e3d41f0e3cf5815cc5b",
+   "rows": 229906,
+   "row_groups": 230
+  },
+  {
+   "path": "data/eng_Latn/train/000_00076.parquet",
+   "bytes": 2964324841,
+   "sha256": "bd3dc93b2a238d1748b26be4554e2584c215d20344cc2ffe6cd0eabcfd9016bb",
+   "rows": 229750,
+   "row_groups": 230
+  },
+  {
+   "path": "data/eng_Latn/train/000_00077.parquet",
+   "bytes": 2999315186,
+   "sha256": "73946578a1d92316f3f2283d2712a5e497adaa7176ed5ac41f0a218e082bbb3a",
+   "rows": 229125,
+   "row_groups": 230
+  },
+  {
+   "path": "data/eng_Latn/train/000_00078.parquet",
+   "bytes": 2927234513,
+   "sha256": "d9c0394f994ff05d9a6102a0941311b3251309aaa2787c0b90c5f9aec2631ce3",
+   "rows": 229809,
+   "row_groups": 230
+  },
+  {
+   "path": "data/eng_Latn/train/000_00079.parquet",
+   "bytes": 2952955523,
+   "sha256": "d69a154f298daf958397bae8e1a24694fcb6b6706f19d06662ba81d01b825a0c",
+   "rows": 225165,
+   "row_groups": 226
+  },
+  {
+   "path": "data/eng_Latn/train/000_00080.parquet",
+   "bytes": 2864383754,
+   "sha256": "d71f16f40a05f0e39c12c1d985047c3bf20fe4cbb1f96a5fdc3dae05a83e5647",
+   "rows": 223794,
+   "row_groups": 224
+  },
+  {
+   "path": "data/eng_Latn/train/000_00081.parquet",
+   "bytes": 2816318738,
+   "sha256": "c4d5640a0a97c737cbf2827e7fcb0f5c4e574e7bb4435eb80047630570948809",
+   "rows": 220500,
+   "row_groups": 221
+  },
+  {
+   "path": "data/eng_Latn/train/000_00082.parquet",
+   "bytes": 2822934869,
+   "sha256": "8634dd8a89fd0ea8700c388f229b29f6fdc9fe43540ec8a4030efa3df80adbe1",
+   "rows": 219914,
+   "row_groups": 220
+  },
+  {
+   "path": "data/eng_Latn/train/000_00083.parquet",
+   "bytes": 2771021138,
+   "sha256": "4eeb58bc769a194f472100ed4acd1d960e35c669caecd96fd4ce6425fabca38d",
+   "rows": 220407,
+   "row_groups": 221
+  },
+  {
+   "path": "data/eng_Latn/train/000_00084.parquet",
+   "bytes": 2785712858,
+   "sha256": "a254130ca3d0b097e086430925e1f8ec1176fe9e99841f09522efa1a85260ee8",
+   "rows": 222046,
+   "row_groups": 223
+  },
+  {
+   "path": "data/eng_Latn/train/000_00085.parquet",
+   "bytes": 2824159633,
+   "sha256": "3801c7604be97367841a8682454babd72266dd55d1de9a7caf015fb18a7c8f87",
+   "rows": 220780,
+   "row_groups": 221
+  },
+  {
+   "path": "data/eng_Latn/train/000_00086.parquet",
+   "bytes": 2774025426,
+   "sha256": "77a8a292338ad0bb8d09a605114964ffc067ec450ae87219c9a8604c02f33494",
+   "rows": 221064,
+   "row_groups": 222
+  },
+  {
+   "path": "data/eng_Latn/train/000_00087.parquet",
+   "bytes": 2791162328,
+   "sha256": "0eddc79dc0b9eb6b9c6c44a0cd16eae646c2d440d20fb4c91f823edd1e7702ed",
+   "rows": 222490,
+   "row_groups": 223
+  },
+  {
+   "path": "data/eng_Latn/train/000_00088.parquet",
+   "bytes": 2776107073,
+   "sha256": "3454dc920fbe2c46e5f746647be8cacd18e7640f8390a82e45cc4a9a1aa79fb0",
+   "rows": 220672,
+   "row_groups": 221
+  },
+  {
+   "path": "data/eng_Latn/train/000_00089.parquet",
+   "bytes": 2833152348,
+   "sha256": "d001ae2ab48707ae1d1b3680856d06c220b723e7e83c37508266465eaf681519",
+   "rows": 218663,
+   "row_groups": 219
+  },
+  {
+   "path": "data/eng_Latn/train/000_00090.parquet",
+   "bytes": 2865593340,
+   "sha256": "c0ae01d59a978a3aac6a9bfb9d46de314e7e73e4aaf1b614987758aac425c443",
+   "rows": 218461,
+   "row_groups": 219
+  },
+  {
+   "path": "data/eng_Latn/train/000_00091.parquet",
+   "bytes": 2901073914,
+   "sha256": "d6e2600fd789b4265e12413b9fba9c55e00a4b7165f76a4ed6c0a7abc0fbc01a",
+   "rows": 221692,
+   "row_groups": 222
+  },
+  {
+   "path": "data/eng_Latn/train/000_00092.parquet",
+   "bytes": 2773391420,
+   "sha256": "7a6db7e2659a19a940a2acd9da9832c6df59920778975fca834b0504f15f23ee",
+   "rows": 220420,
+   "row_groups": 221
+  },
+  {
+   "path": "data/eng_Latn/train/000_00093.parquet",
+   "bytes": 2846662394,
+   "sha256": "705c735a036a1ec373fe954e6cac0987fec5de758d76661aff73721e57f8ab0d",
+   "rows": 218688,
+   "row_groups": 219
+  },
+  {
+   "path": "data/eng_Latn/train/000_00094.parquet",
+   "bytes": 2805345611,
+   "sha256": "4e879951a59295491b517fdb867903e5e190f97f0bbca3e1e24a2e502c3ae385",
+   "rows": 219204,
+   "row_groups": 220
+  },
+  {
+   "path": "data/eng_Latn/train/000_00095.parquet",
+   "bytes": 2883546402,
+   "sha256": "c466237eaf966b5d8f10c18156c0d68286a91277c837b9e7c261587e51ed80d7",
+   "rows": 221135,
+   "row_groups": 222
+  },
+  {
+   "path": "data/eng_Latn/train/000_00096.parquet",
+   "bytes": 2836403419,
+   "sha256": "d09ba61cb38ed0f2e9a5ebe06d93690e0fa39a44afdada66fa0e65da62f0af98",
+   "rows": 221741,
+   "row_groups": 222
+  },
+  {
+   "path": "data/eng_Latn/train/000_00097.parquet",
+   "bytes": 2922224243,
+   "sha256": "ee8eb1a3c90b623a820be8b8c27504cdee8bcf95723f00db23fec932e304d018",
+   "rows": 219432,
+   "row_groups": 220
+  },
+  {
+   "path": "data/eng_Latn/train/000_00098.parquet",
+   "bytes": 2892337437,
+   "sha256": "137b106d9e2734b997e3accc1b0bedb9833d0858bb8a40c05340506eff2795ec",
+   "rows": 218862,
+   "row_groups": 219
+  },
+  {
+   "path": "data/eng_Latn/train/000_00099.parquet",
+   "bytes": 2859922363,
+   "sha256": "62d47ac68b1c27e59eed2364903f9edad650be5b7fa648b7e5f8b8b29425bd26",
+   "rows": 221626,
+   "row_groups": 222
+  }
+ ]
+}

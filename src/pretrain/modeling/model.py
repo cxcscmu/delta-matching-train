@@ -157,9 +157,13 @@ class PretrainLM(nn.Module):
 
     # -- config (de)serialization, used by the trainer's HF-style save --
     def save_config(self, save_dir: str | os.PathLike):
+        """model_config.json, flushed and fsynced: it is part of a checkpoint, whose .complete marker the trainer writes
+        only once every file of it is on disk."""
         os.makedirs(save_dir, exist_ok=True)
         with open(os.path.join(save_dir, "model_config.json"), "w") as f:
             json.dump(asdict(self.cfg), f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
 
     @classmethod
     def from_config_file(cls, path: str | os.PathLike) -> "PretrainLM":

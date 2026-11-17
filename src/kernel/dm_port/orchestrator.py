@@ -6,6 +6,11 @@ Delta modes (the arm's `dm_mode`):
   stale     delta = rowsum(dO * O) from the forward's O, dP quantized       (the paper's "naive fp8" arm)
   matched   delta from the backward's own realized fp8 P / dP pair (pass 0 of the kernel, delta_fp8), dP quantized
             (Delta-Matching)
+  aux_out   Attn-QAT's correction as a baseline (kernel/dm_port/aux_out.py): the forward also computes and saves
+            O' = bf16(P) @ V-hat from the kernel's own Q/K codes, scales and LSE (P before any fp8 cast, V-hat the
+            dequantized fp8 V) in a separate pass after the unchanged forward kernel; the backward's delta is
+            rowsum(dequant(dO8) * O') (the dO quantizer's consistent-dO realization) and the fp8 backward runs
+            unchanged with it, without pass 0.  Equal to the matched delta in exact arithmetic.
   bf16_dp   the stale delta with the single dP = dO V^T matmul kept in bf16 (SageBwd's exemption among the seven
             attention matmuls, arXiv 2505.11594 Algorithm 3 line 8, with the delta still Algorithm 3 line 2's
             rowsum(dO o O) over the quantized forward's O).  Needs the kernel built with DM_BF16_DP=1
@@ -41,8 +46,8 @@ try:
     import delta_matching  # noqa: F401
 except ImportError as _e:  # pragma: no cover
     raise ImportError("kernel.dm_port.orchestrator needs the Delta-Matching kernel package: install the delta-matching "
-                      "kernel package (see docs/SETUP.md section 3: git clone --recursive, then "
-                      "pip install --no-build-isolation .)") from _e
+                      "kernel package (see docs/SETUP.md section 3: scripts/install_kernel.sh builds the bundled "
+                      "kernels/delta-matching)") from _e
 
 from delta_matching.attn import _ops_gt
 from delta_matching.core import _check_hd, blocks
@@ -51,6 +56,7 @@ from delta_matching import split as _split
 from delta_matching.twins import twin_pi
 
 from kernel.dm_port import diag
+from kernel.dm_port.aux_out import AUX_OUT_VERSION, aux_out as _aux_out_fwd
 from kernel.dm_port.fused_producers.m13_rope_bwd import rope_bwd_q
 from kernel.dm_port.fused_producers.tier3a_ropeq import ropeq_q
 
@@ -116,8 +122,11 @@ ORCHESTRATOR_VERSION = "dm-orchestrator-v1"
 # stale     stale delta, dP QUANTIZED     (the paper's "naive fp8" arm)
 # matched   matched delta, dP quantized   (Delta-Matching)
 # bf16_dp   stale delta, dP in RAW BF16   (SageBwd's exemption; needs a DM_BF16_DP=1 build, asserted below)
-_MATCHED = {"stale": False, "matched": True, "bf16_dp": False}
-_BF16DP = {"stale": False, "matched": False, "bf16_dp": True}
+# aux_out   aux-output delta, dP quantized (Attn-QAT's correction on these kernels; a baseline, kernel/dm_port/aux_out.py)
+_MATCHED = {"stale": False, "matched": True, "bf16_dp": False, "aux_out": False}
+_BF16DP = {"stale": False, "matched": False, "bf16_dp": True, "aux_out": False}
+_AUX = {"stale": False, "matched": False, "bf16_dp": False, "aux_out": True}
+_aux_announced = [False]
 # Memory option (default OFF, bitwise: the twin is a layout copy of the saved Q8): DM_QT_RECOMPUTE=1 does not save the Q
 # twin for the backward and re-makes it there (one short pass).
 _QT_RECOMPUTE = _os.environ.get("DM_QT_RECOMPUTE", "0") == "1"
@@ -136,12 +145,13 @@ class _FusedDMAttn(torch.autograd.Function):
     edge); V8kv / V8skv the pre-expansion V codes / scales; cos / sin (B, N, rotary_dim) bf16.  Returns O (B, N, H, D)."""
 
     @staticmethod
-    def forward(ctx, q_pre, k_rot, v_t, V8kv, V8skv, cos, sin, n_rep, matched, bf16_dp=False, diag_layer=None):
+    def forward(ctx, q_pre, k_rot, v_t, V8kv, V8skv, cos, sin, n_rep, matched, bf16_dp=False, diag_layer=None, aux=False):
         B, H, N, D = q_pre.shape
         Hkv = k_rot.shape[1]
         assert Hkv * n_rep == H and k_rot.shape == (B, Hkv, N, D)
         assert D in (128, 256), f"the dm orchestrator runs head_dim 128 or 256 (got {D})"
-        assert N % 128 == 0, f"the Delta-Matching kernel needs N % 128 == 0 (got {N})"
+        assert N % (256 if D == 128 else 128) == 0, \
+            f"the Delta-Matching kernel needs N % {256 if D == 128 else 128} == 0 at head_dim {D} (got {N})"
         BM, BN = blocks(D)
         assert V8kv.shape == (B * Hkv, N, D) and V8skv.shape == (B * Hkv, N // BN), \
             f"V8kv/V8skv must be [B*Hkv, N, {D}] / [B*Hkv, N/{BN}] (got {tuple(V8kv.shape)} {tuple(V8skv.shape)})"
@@ -157,11 +167,25 @@ class _FusedDMAttn(torch.autograd.Function):
         O, Lse = ops.fwd_fp8(bshd(Q8, H), bshd(K8kv, Hkv), bshd(V8kv, Hkv),
                              Q8s.view(B, H, -1), K8skv.view(B, Hkv, -1),
                              V8skv.view(B, Hkv, -1), sm, True)
+        # aux_out: O' = bf16(P) @ V-hat from the SAME codes, scales and LSE, in a separate pass after the forward
+        # kernel, saved for the backward's delta.  On a DM_DIAG-logged microbatch of any other arm it is computed as a
+        # side channel too (never fed back), so the diag records the aux residual on every arm's trajectory.
+        Oaux = None
+        if aux or (diag_layer is not None and diag.next_is_logged()):
+            if aux and not _aux_announced[0]:
+                _aux_announced[0] = True
+                print(f"[dm_port] AUX-OUTPUT DELTA (dm_mode aux_out, {AUX_OUT_VERSION}): O' = bf16(P) @ V-hat from the "
+                      f"kernel's own codes / scales / LSE in a separate pass after the forward kernel, saved in bf16; "
+                      f"backward delta = rowsum(dequant(dO8) * O'); no pass 0", flush=True)
+            Oaux = _aux_out_fwd(Q8.view(B * H, N, D), Q8s, K8kv.view(B * Hkv, N, D), K8skv, V8kv, V8skv, Lse,
+                                B, H, Hkv, N, D, causal=True)
         # bf16_dp also needs the RAW bf16 V for its exempt matmul; v_t is already an input (the dv graph edge), so
         # this only retains it.  ~17 MB per attention layer per rank at the M-tier hd128 cell.
         ctx.save_for_backward(Q8, Q8s, Qt, K8kv, K8skv, V8kv, V8skv, kTtkv, O, Lse, cos, sin,
-                              *((v_t,) if bf16_dp else ()), *((k_rot,) if diag_layer is not None else ()))
-        ctx.meta = (B, H, Hkv, int(n_rep), N, D, bool(matched), q_pre.dtype, bool(bf16_dp), diag_layer)
+                              *((v_t,) if bf16_dp else ()), *((k_rot,) if diag_layer is not None else ()),
+                              *((Oaux,) if Oaux is not None else ()))
+        ctx.meta = (B, H, Hkv, int(n_rep), N, D, bool(matched), q_pre.dtype, bool(bf16_dp), diag_layer, bool(aux),
+                    Oaux is not None)
         return O  # (B, N, H, D) bf16 contiguous
 
     @staticmethod
@@ -169,12 +193,16 @@ class _FusedDMAttn(torch.autograd.Function):
     def backward(ctx, dO):
         saved = ctx.saved_tensors
         Q8, Q8s, Qt, K8kv, K8skv, V8kv, V8skv, kTtkv, O, Lse, cos, sin = saved[:12]
-        B, H, Hkv, n_rep, N, D, matched, in_dtype, bf16_dp, diag_layer = ctx.meta
+        B, H, Hkv, n_rep, N, D, matched, in_dtype, bf16_dp, diag_layer, aux, has_aux = ctx.meta
         BM, BN = blocks(D)
         # side channel only: no_grad, detached, its own files, never fed back (kernel/dm_port/diag.py)
         dg = diag.begin(diag_layer) if diag_layer is not None else False
-        v_raw = saved[12] if bf16_dp else None
-        k_rot_diag = saved[13 if bf16_dp else 12] if diag_layer is not None else None
+        _i = 12
+        v_raw = saved[_i] if bf16_dp else None
+        _i += int(bf16_dp)
+        k_rot_diag = saved[_i] if diag_layer is not None else None
+        _i += int(diag_layer is not None)
+        Oaux = saved[_i] if has_aux else None
         ops = _ops_for(D)
         if bf16_dp and int(getattr(ops, "build_bf16dp", lambda: 0)()) != 1:
             raise RuntimeError("dm_mode bf16_dp needs the delta_matching kernel built with DM_BF16_DP=1 (build_bf16dp() == 1)")
@@ -184,25 +212,39 @@ class _FusedDMAttn(torch.autograd.Function):
         # dO codes/scales per [BM, D] block (+ the twin); the stale delta only when needed.
         # On a logged diag step take the stale delta in every arm (it is the cheap one) so that eps can be
         # formed for BOTH arms; off the logged steps this is exactly the original call.
-        want_stale = dg or not matched
-        if _DELTA_Q8:
-            if matched:
-                raise ValueError("DM_DELTA_Q8=1 is a STALE-delta study flag (delta = rowsum(dequant(dO8) * O)); "
-                                 "it has no meaning under the matched arm (the arm name decides the numerics)")
-            if not _delta_q8_announced[0]:
-                _delta_q8_announced[0] = True
-                print("[dm_port] STALE DELTA FROM THE dO CODES: delta = rowsum(dequant(dO8) * O), the operand dP sees "
-                      "(DM_DELTA_Q8=1; the raw-dO rowsum is off)", flush=True)
-        dO8, dO8s, Dlt, dOt = doq_m17(dO, O if want_stale else None, H, BM,
-                                      want_delta=want_stale, want_twin=True, delta_from_codes=_DELTA_Q8)
-        Dlt_stale = Dlt if want_stale else None
+        Dlt_aux = None
+        if aux:
+            # the aux-output delta: rowsum(dequant(dO8) * O'), the dO quantizer's consistent-dO realization with O' in
+            # place of O (the codes are the ones the dP matmul multiplies); the side-channel stale delta on logged steps
+            if _DELTA_Q8:
+                raise ValueError("DM_DELTA_Q8=1 is the consistent-dO arm's stale-delta switch; dm_mode aux_out always forms "
+                                 "its delta from the dO codes and O' (unset DM_DELTA_Q8)")
+            dO8, dO8s, Dlt, dOt = doq_m17(dO, Oaux, H, BM, want_delta=True, want_twin=True, delta_from_codes=True)
+            Dlt_aux = Dlt
+            Dlt_stale = doq_m17(dO, O, H, BM, want_delta=True, want_twin=False)[2] if dg else None
+        else:
+            want_stale = dg or not matched
+            if _DELTA_Q8:
+                if matched:
+                    raise ValueError("DM_DELTA_Q8=1 is a STALE-delta study flag (delta = rowsum(dequant(dO8) * O)); "
+                                     "it has no meaning under the matched arm (the arm name decides the numerics)")
+                if not _delta_q8_announced[0]:
+                    _delta_q8_announced[0] = True
+                    print("[dm_port] STALE DELTA FROM THE dO CODES: delta = rowsum(dequant(dO8) * O), the operand dP sees "
+                          "(DM_DELTA_Q8=1; the raw-dO rowsum is off)", flush=True)
+            dO8, dO8s, Dlt, dOt = doq_m17(dO, O if want_stale else None, H, BM,
+                                          want_delta=want_stale, want_twin=True, delta_from_codes=_DELTA_Q8)
+            Dlt_stale = Dlt if want_stale else None
+            if dg and Oaux is not None:   # side channel: the aux delta this arm would have used (same dO codes)
+                Dlt_aux = doq_m17(dO, Oaux, H, BM, want_delta=True, want_twin=False, delta_from_codes=True)[2]
 
         def bshd(x, h):
             return x.view(B, h, N, D).permute(0, 2, 1, 3)
 
         Dlt_matched = None
         _hp = _split._bwd_heads_per_call(B, H, Hkv, n_rep, N) if not bf16_dp else H
-        _chunked_matched = matched and not dg and _hp < H and _split._BWD_STREAMS > 1   # pass 0 per group, only on the stream path
+        # pass 0 per group only on the stream path (the bundled kernel's split route takes it once on all heads at D128)
+        _chunked_matched = matched and not dg and _hp < H and _split._BWD_STREAMS > 1
         if (matched or dg) and not _chunked_matched:
             Dlt_matched = ops.delta_fp8(bshd(dO8, H), bshd(Q8, H), bshd(K8kv, Hkv), bshd(V8kv, Hkv),
                                         Lse.view(B, H, N).contiguous(), kTtkv.view(B, Hkv, D, N),
@@ -210,8 +252,9 @@ class _FusedDMAttn(torch.autograd.Function):
                                         V8skv.view(B, Hkv, -1), dO8s.view(B, H, -1), True).view(B * H, N)
         if matched and Dlt_matched is not None:
             Dlt = Dlt_matched
-        # on the per-group matched path (_chunked_matched) no all-heads delta exists yet: pass 0 runs per group inside
-        # _bwd_by_head_groups, which ignores this slot
+        # on the per-group matched path (_chunked_matched) no all-heads delta exists yet: _bwd_by_head_groups takes
+        # pass 0 itself (per group at D256; once on all heads, then sliced, at D128 in the bundled kernel) and
+        # ignores this slot
         bwd_args = (bshd(dO8, H), bshd(Q8, H), bshd(K8kv, Hkv), bshd(V8kv, Hkv),
                     Lse, Dlt.view(B, H, N) if Dlt is not None else None, kTtkv.view(B, Hkv, D, N),
                     Qt.view(B, H, D, N), dOt.view(B, H, D, N),
@@ -231,7 +274,8 @@ class _FusedDMAttn(torch.autograd.Function):
                     print(f"[dm_port] BACKWARD PER HEAD GROUP: {_hp} query head(s) per call ({H // _hp} calls; dS' workspace "
                           f"{B * _hp * N * N / 2 ** 30:.1f} GiB per call instead of {B * H * N * N / 2 ** 30:.1f} GiB; "
                           f"DM_BWD_HEAD_GROUPS={_split._BWD_GROUPS}, limit {_split._BWD_WS_LIMIT / 2 ** 30:.0f} GiB; "
-                          f"streams {_split._BWD_STREAMS}; pass 0 {'per group' if _chunked_matched else 'all heads'})", flush=True)
+                          f"streams {_split._BWD_STREAMS}; pass 0 {'per group' if _chunked_matched else 'all heads'}"
+                          f"{' (the bundled kernel takes it once on all heads at head_dim 128)' if _chunked_matched and D == 128 else ''})", flush=True)
                 dq, dk, dv = _split._bwd_by_head_groups(ops, bwd_args, sm, B, H, Hkv, n_rep, N, D, _hp,
                                                         matched_delta=_chunked_matched)
         if dg:
@@ -247,20 +291,29 @@ class _FusedDMAttn(torch.autograd.Function):
                                      dk, _eps.view(B * H, N), dO8.view(B * H, N, D), B, H, Hkv, N, D, BM, BN)
             # k_dc from the RAW post-RoPE keys: the K codes are mean-centered per (b, h) by the smooth-K quantizer,
             # so their DC statistic is ~0 by construction
+            # eps_aux = delta_matched - delta_aux: the residual the aux-output delta leaves in rowsum(dS) (the arm's own
+            # on the aux_out arm, a counterfactual on the others); on the aux arm also its force on the gains
+            _eps_aux = (Dlt_matched - Dlt_aux.view(B * H, N)) if Dlt_aux is not None else None
+            _force_aux = None
+            if aux and _eps_aux is not None:
+                _force_aux = diag.gain_force(Q8.view(B * H, N, D), Q8s, K8kv.view(B * Hkv, N, D), K8skv, k_rot_diag,
+                                             dk, _eps_aux.view(B * H, N), dO8.view(B * H, N, D), B, H, Hkv, N, D, BM, BN)
             diag.record(diag_layer, dk=dk, dv=dv, dq=dq, eps=_eps, q8=Q8, lse=Lse, rows=_rows,
                         kdc=diag.dc_raw(k_rot_diag.reshape(B * Hkv, N, D)),
-                        qdc=diag.dc(Q8.view(B * H, N, D), Q8s, B * H, BM), force=_force)
+                        qdc=diag.dc(Q8.view(B * H, N, D), Q8s, B * H, BM), force=_force,
+                        eps_aux=_eps_aux, force_aux=_force_aux, dlt_matched=Dlt_matched)
         dq_pre = rope_bwd_q(dq, cos, sin, H)          # the one-pass q-RoPE backward (bitwise the autograd replay)
         dk = dk.permute(0, 2, 1, 3)
         dv = dv.permute(0, 2, 1, 3)
         if n_rep > 1:   # EXACT aten repeat_interleave backward: dk/dv per query head folded to the KV heads
             dk = dk.reshape(B, Hkv, n_rep, N, D).sum(2)
             dv = dv.reshape(B, Hkv, n_rep, N, D).sum(2)
-        return dq_pre, dk, dv, None, None, None, None, None, None, None, None
+        return dq_pre, dk, dv, None, None, None, None, None, None, None, None, None
 
 
 def fused_dm_attention(q_pre, k_rot, v_t, V8kv, V8skv, cos, sin, n_rep: int, mode: str = "matched", diag_layer=None):
-    """The dm mixer's attention core: mode in stale | matched | bf16_dp (see the module docstring)."""
+    """The dm mixer's attention core: mode in stale | matched | bf16_dp | aux_out (see the module docstring)."""
     if mode not in _MATCHED:
-        raise ValueError(f"fused_dm_attention supports stale|matched|bf16_dp, got {mode!r}")
-    return _FusedDMAttn.apply(q_pre, k_rot, v_t, V8kv, V8skv, cos, sin, int(n_rep), _MATCHED[mode], _BF16DP[mode], diag_layer)
+        raise ValueError(f"fused_dm_attention supports stale|matched|bf16_dp|aux_out, got {mode!r}")
+    return _FusedDMAttn.apply(q_pre, k_rot, v_t, V8kv, V8skv, cos, sin, int(n_rep), _MATCHED[mode], _BF16DP[mode],
+                              diag_layer, _AUX[mode])

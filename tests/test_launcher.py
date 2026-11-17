@@ -1,8 +1,9 @@
 """scripts/campaign/train_arm.sh end to end on one GPU with the tiny configs (DM_TRAIN_CONFIG): the arm table, the
-`env` launch (ranks started by the script), the completion marker and the patched export, the idempotent relaunch,
-SIGTERM forwarding to the trainer (exit 75, no export), and the resume that follows. This is the chain a job that a
-scheduler may stop relies on."""
-import json, os, signal, subprocess, time
+`env` launch (ranks started by the script), the completion marker (with the trained steps), the progress line and the
+patched export, the idempotent relaunch, SIGTERM forwarding to the trainer (exit 75, no export), and the resume that
+follows (the rank logs keep both launches). This is the chain a job that a scheduler may stop relies on. The same
+decisions without a GPU, with stand-in ranks: tests/test_driver_launch.py."""
+import json, os, re, signal, subprocess, time
 import pytest
 from _helpers import REPO, base_env, require_kernel, data_root, tokenizer_dir, python, read_metrics, dm_route, free_port
 
@@ -27,11 +28,13 @@ def _run(run_root, gpu, tag, **extra):
 
 def test_launcher_env_launch_completes_and_is_idempotent(run_root, root, tok_dir, test_gpu):
     tag = f"_t{os.getpid()}"
-    rc, log = _run(run_root, test_gpu, tag, NUM_STEPS="6")
+    progress = run_root / f"progress{tag}"
+    rc, log = _run(run_root, test_gpu, tag, NUM_STEPS="6", DM_PROGRESS_FILE=str(progress))
     assert rc == 0, log[-4000:]
     rn = "Q35M_clean_sdpa_ffn8_hd128_11785" + tag
     hf = run_root / "qwen35_m" / "hf" / rn
     assert (hf / "TRAIN_COMPLETE").exists(), log[-3000:]
+    assert (hf / "TRAIN_COMPLETE").read_text().endswith(" steps=6 num_steps=6\n"), (hf / "TRAIN_COMPLETE").read_text()
     cfg = json.load(open(hf / "config.json"))
     assert cfg["attn_impl"] == "sdpa" and (hf / "config.train.json").exists(), "export not patched for the clean-kernel eval"
     assert json.load(open(hf / "config.train.json"))["layer_mixers"][-1] == "gqa", "the clean arm did not train the gqa core"
@@ -39,6 +42,9 @@ def test_launcher_env_launch_completes_and_is_idempotent(run_root, root, tok_dir
     assert (run_root / "logs" / f"{rn}.rank0.log").exists() and (run_root / "logs" / f"{rn}.metrics.jsonl").exists()
     assert "dm" not in dm_route((run_root / "logs" / f"{rn}.rank0.log").read_text()), "the clean arm built the dm mixer"
     assert sorted(int(p.name.split("-")[-1]) for p in (run_root / "qwen35_m" / "ckpts" / rn).glob("checkpoint-*")) == [3, 6], "the launcher keeps SAVE_TOTAL_LIMIT=2 checkpoints: 3 and the final 6"
+    # the progress lines of the chain contract: the trainer's checkpoints, then the launcher's completion
+    kinds = [l.split()[2:4] for l in progress.read_text().splitlines()]
+    assert kinds[-1] == ["train_complete", rn] and ["ckpt", rn] in kinds, progress.read_text()
     rc, log = _run(run_root, test_gpu, tag, NUM_STEPS="6")
     assert rc == 0 and "already complete" in log, log[-2000:]
 
@@ -64,7 +70,11 @@ def test_launcher_forwards_sigterm_then_resumes(run_root, root, tok_dir, test_gp
     assert not (run_root / "qwen35_m" / "hf" / rn / "TRAIN_COMPLETE").exists()
     rc, log = _run(run_root, test_gpu, tag, NUM_STEPS="400", STOP_AT_STEP=str(ck[-1] + 2))
     assert rc == 0 and (run_root / "qwen35_m" / "hf" / rn / "TRAIN_COMPLETE").exists(), log[-3000:]
-    assert f"checkpoint-{ck[-1]}" in (run_root / "logs" / f"{rn}.rank0.log").read_text()
+    marker = (run_root / "qwen35_m" / "hf" / rn / "TRAIN_COMPLETE").read_text()
+    assert marker.endswith(f" steps={ck[-1] + 2} num_steps=400\n"), marker   # a STOP_AT_STEP run says where it ended
+    rank0 = (run_root / "logs" / f"{rn}.rank0.log").read_text()
+    assert f"checkpoint-{ck[-1]}" in rank0
+    assert len(re.findall(r"^===== launch .* rank 0 of 1 of ", rank0, re.M)) == 2, "the rank log lost the first launch"
 
 
 # arm -> (tiny config, the attention mixer the run trains (config.train.json, before the export patch), dm_mode)

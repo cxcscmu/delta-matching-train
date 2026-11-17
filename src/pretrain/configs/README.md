@@ -1,9 +1,10 @@
 # `src/pretrain/configs`: the study's model configs
 
 Every yaml is self-contained (`--config FILE`, then any `--section.key value` override wins). The launcher
-(`scripts/campaign/arms.sh` + `train_arm.sh`, driven by the experiment scripts in `scripts/experiments/`) runs all seven
-of them and adds the attention geometry, the mixer list, the numerics flags and the data paths on the command line, so
-for a launched run the yaml supplies the architecture, the schedule and the budget. Two data facts are shared by all:
+(`scripts/campaign/arms.sh` + `train_arm.sh`, driven by the experiment scripts in `scripts/experiments/`) runs all nine
+of them (the 9.3 B `qwen35_xl.yaml` through `scripts/experiments/stage1_xl.sh`) and adds the attention geometry, the mixer list, the numerics
+flags and the data paths on the command line, so for a launched run the yaml supplies the architecture, the schedule
+and the budget. Two data facts are shared by all:
 the Nemotron-CC-v2.1 HQ+DQA corpus in Llama-2 32k ids (naive packing, `position_mode: packed`, BOS/EOS in-stream;
 `data/pretrain_stage1.md`) and `data.seed 11785` (the data order; the `--seed` argument changes the initialization only,
 and every arm of a cell starts from the same seed).
@@ -12,6 +13,8 @@ and every arm of a cell starts from the same seed).
 |---|---|---|---|---|---|
 | `qwen35_m.yaml` | the Qwen3.5-2B-Base block, 24 layers, d 2048, 3:1 GatedDeltaNet : GQA | 1.665 B | 8q/2kv head_dim 256 in the yaml (the head_dim-256 arms); the head_dim-128 arms override to 16q/4kv head_dim 128 (`GEOM128` in arms.sh) | GatedDeltaNet 16 heads x 128 | 128 x 8192 tokens per step, 28,610 steps = 30.0 B tokens, lr 2.4e-3, WSD |
 | `qwen35_xs.yaml`, `qwen35_l.yaml` | the head_dim-256 scale ladder around qwen35_m | 0.569 B / 5.289 B | 6q/2kv and 16q/4kv at head_dim 256 | GatedDeltaNet (the large cell widens V) | as qwen35_m |
+| `qwen35_xl.yaml` | the ladder's next cell up: the Qwen3.5-9B-Base block (d 4096, FFN 12288 = 3 d) at 36 layers (27 GatedDeltaNet + 9 attention); arms `xl_*_hd256` (activation checkpointing on) | 9.275 B (9,274,983,360) | 16q/4kv at head_dim 256, as qwen35_l (q_dim 4096 = d) | GatedDeltaNet 16 QK / 32 V heads x 128, V heads 256 wide through expand_v 2, as qwen35_l (value_dim 8192 = 2 d) | as qwen35_m (3.2 tok/param); needs activation checkpointing on 32 80 GB GPUs, and the header has the memory and 48-hour estimates |
+| `qwen35_l_kda.yaml` | the KDA : GQA twin of qwen35_l: d 3072, 32 layers (24 KDA + 8 attention) | 5.293 B (5,292,698,368, +0.078 % against qwen35_l) | 16q/4kv at head_dim 256, as qwen35_l | Kimi Delta Attention, 32 heads x 128, value width = key width (expand_v 1), short conv 4; FFN 12160 (3.96 d) for parity | as qwen35_m; the header records the early-training diagnosis behind the clean arm's 1.2e-3 LR hedge (`scripts/experiments/stage1_l_kda.sh`) |
 | `qwen35_m_mla.yaml` | the GDN : MLA twin | 1.665 B | Multi-head Latent Attention, 16 heads, [rope 64 &#124; nope 64] q/k, v 128, latent 384, MHA on the wire | GatedDeltaNet | as qwen35_m |
 | `qwen35_m_mamba2.yaml` | the Mamba2 : GQA twin | 1.666 B | 16q/4kv head_dim 128 | Mamba2 (d_inner 4096, headdim 64, d_state 128); FFN 7104 for parameter parity | as qwen35_m |
 | `qwen35_m_kda.yaml` | the KDA : GQA twin | 1.665 B | 16q/4kv head_dim 128 | Kimi Delta Attention (16 heads x 128, expand_v 1); FFN 8064 for parity | as qwen35_m |

@@ -79,6 +79,27 @@ def dist_close() -> None:
         dist.destroy_process_group()
 
 
+def broadcast_object(obj, src: int = 0):
+    """`obj` as rank `src` has it, on every rank (a pickled broadcast_object_list; the other ranks' `obj` is ignored).
+    Without a process group: `obj` itself. Used for decisions one rank takes for all (the checkpoint to resume, ...):
+    every rank then acts on the same input, and an error on `src` can be handed to the others instead of leaving them
+    waiting in the next collective."""
+    if not is_dist():
+        return obj
+    box = [obj if dist.get_rank() == src else None]
+    dist.broadcast_object_list(box, src=src)
+    return box[0]
+
+
+def all_gather_objects(obj) -> list:
+    """Every rank's `obj` (picklable), in rank order, on every rank; [obj] without a process group."""
+    if not is_dist():
+        return [obj]
+    out = [None] * dist.get_world_size()
+    dist.all_gather_object(out, obj)
+    return out
+
+
 def sync_tensor(value, reduce: str = "mean", dim: int = 0):
     """All-gather a (scalar or tensor) `value` across ranks and reduce.
 

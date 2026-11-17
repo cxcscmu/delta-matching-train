@@ -21,8 +21,11 @@ PLANS = {
     "stage1_architectures": (1, {**{f"{f}_{a}_hd128": ("11785", "2") for f in ("mla", "kda", "mamba2")
                                     for a in ("clean", "dm_stale", "dm_matched")},
                                  **{f"gqa_{a}_hd128": ("11785", "1") for a in ("clean", "dm_stale", "dm_matched")}}),
+    "stage1_l_kda": (1, {f"l_kda_{a}_hd256": ("11785",) for a in ("clean", "dm_stale", "dm_matched")}),
+    "stage1_xl": (1, {f"xl_{a}_hd256": ("11785",) for a in ("clean", "dm_stale", "dm_matched")}),
     "stage1_nope": (1, {f"nope_{a}_hd128": ("11785", "2") for a in ("clean", "dm_stale", "dm_matched")}),
     "stage1_muon": (1, {f"muon_{a}_hd128": ("11785",) for a in ("clean", "dm_stale", "dm_matched")}),
+    "stage1_hd128_auxout": (1, {a: ("11785",) for a in ("dm_auxout_hd128", "dm_matched_hd128")}),
     "stage2_context": (2, {a: ("11785", "2") for a in ("clean_hd128", "dm_matched_hd128", "dm_stale_hd128", "te_fp8")}),
 }
 PLAN_RE = re.compile(r"^  (\S+) seed (\S+) -> (\S+): bash (\S+) \S+ \S+; bash (\S+) (\S+)$")
@@ -94,8 +97,9 @@ exit 0
 
 
 def test_driver_flow(tmp_path):
-    """Train then evaluate each run; a failed training skips its evaluation and is reported (exit 1); the rest still run."""
-    root, log = _stub_tree(tmp_path, {"muon_dm_stale_hd128": 3})
+    """Train then evaluate each run; a failed training skips its evaluation and is reported (outside a chain: exit 1);
+    the rest still run. (Exit 3, a run owned by another job, and the chain's retries: tests/test_driver_run.py.)"""
+    root, log = _stub_tree(tmp_path, {"muon_dm_stale_hd128": 1})
     p = _run(root / "scripts" / "experiments" / "stage1_muon.sh", [], tmp_path)
     calls = log.read_text().splitlines()
     assert calls == ["train train_arm.sh muon_clean_hd128 11785", "eval eval_arm.sh Q35M_clean_sdpa_ffn8_hd128_11785_muon",
@@ -117,3 +121,46 @@ def test_driver_stops_on_early_stop_and_skips_eval_in_smoke(tmp_path):
     p = _run(root / "scripts" / "experiments" / "stage1_nope.sh", [], tmp_path, SMOKE=1)
     calls = log.read_text().splitlines()
     assert p.returncode == 0 and len(calls) == 6 and all(c.startswith("train train_arm.sh nope_") for c in calls), calls
+
+
+def test_driver_defers_an_evaluation_that_does_not_fit_in_the_job(tmp_path):
+    """Under a deadline (DM_STOP_BEFORE, scripts/slurm/job.sh) an evaluation starts only with DM_EVAL_BUDGET seconds left
+    before the job's end (DM_JOB_END, else DM_STOP_BEFORE + DM_STOP_MARGIN of 600 s; stage 1: 2400 s by default).
+    Otherwise it is deferred and the job goes on training the next runs, then exits 75: the next job of the chain
+    evaluates first (tests/test_driver_run.py). A job that started less than 10 minutes ago evaluates anyway (the next
+    one would have no more time)."""
+    import time
+    root, log = _stub_tree(tmp_path, {})
+    script = root / "scripts" / "experiments" / "stage1_muon.sh"
+    now = int(time.time())
+    p = _run(script, [], tmp_path, DM_STOP_BEFORE=now + 1200, SLURM_JOB_START_TIME="")   # the job ends in 30 min
+    assert p.returncode == 75 and log.read_text().splitlines() == [f"train train_arm.sh {a}_hd128 11785" for a in (
+        "muon_clean", "muon_dm_stale", "muon_dm_matched")], p.stdout
+    assert p.stdout.count("no time left in this job for its evaluation") == 3, p.stdout
+    for extra in ({"SLURM_JOB_START_TIME": now}, {"DM_EVAL_BUDGET": 60, "SLURM_JOB_START_TIME": ""}, {}):
+        log.unlink()
+        env = {"DM_STOP_BEFORE": now + 1200, **extra} if extra else {"SLURM_JOB_START_TIME": ""}   # {}: no deadline
+        p = _run(script, [], tmp_path, **env)
+        calls = log.read_text().splitlines()
+        assert p.returncode == 0 and len(calls) == 6 and sum(c.startswith("eval ") for c in calls) == 3, (extra, calls)
+
+
+def test_driver_stops_with_75_when_a_sigterm_stops_an_evaluation(tmp_path):
+    """Slurm's SIGTERM (the time limit) reaches the evaluation itself; the driver outlives it and exits 75 (relaunch to
+    finish: the evaluation resumes from its per-benchmark markers) instead of dying with 143, which ends a chain."""
+    import signal, time
+    root, log = _stub_tree(tmp_path, {})
+    ready = tmp_path / "ready"
+    (root / "scripts" / "campaign" / "eval_arm.sh").write_text(
+        f'#!/bin/bash\necho "eval eval_arm.sh $*" >> "{log}"\ntouch "{ready}"\nsleep 60 & wait\n')
+    p = subprocess.Popen(["bash", str(root / "scripts" / "experiments" / "stage1_muon.sh")], stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, text=True, env=dry_env(tmp_path), start_new_session=True)
+    t0 = time.time()
+    while not ready.exists():
+        assert p.poll() is None and time.time() - t0 < 60, "the evaluation never started"
+        time.sleep(0.05)
+    os.killpg(p.pid, signal.SIGTERM)
+    out, err = p.communicate(timeout=60)
+    assert p.returncode == 75 and "evaluation stopped by SIGTERM" in out, (p.returncode, out[-1500:], err[-1500:])
+    assert log.read_text().splitlines() == ["train train_arm.sh muon_clean_hd128 11785",
+                                            "eval eval_arm.sh Q35M_clean_sdpa_ffn8_hd128_11785_muon"]

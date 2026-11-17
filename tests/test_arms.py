@@ -23,6 +23,7 @@ ARMS = {
     "dm_stale_hd128": ("Q35M_dm_stale_ffn8_qkvo8_hd128_11785", "qwen35_m.yaml", "dm", "gated_deltanet", "stale", "ffn_qkvo", None, G128),
     "dm_matched_hd128": ("Q35M_dm_matched_ffn8_qkvo8_hd128_11785", "qwen35_m.yaml", "dm", "gated_deltanet", "matched", "ffn_qkvo", None, G128),
     "dm_consistent_hd128": ("Q35M_dm_consistent_ffn8_qkvo8_hd128_11785", "qwen35_m.yaml", "dm", "gated_deltanet", "stale", "ffn_qkvo", None, G128),
+    "dm_auxout_hd128": ("Q35M_dm_auxout_ffn8_qkvo8_hd128_11785", "qwen35_m.yaml", "dm", "gated_deltanet", "aux_out", "ffn_qkvo", None, G128),
     "te_fp8": ("Q35M_te_fp8_ffn8_qkvo8_hd128_11785", "qwen35_m.yaml", "gqa", "gated_deltanet", None, "ffn_qkvo", "te_fp8", G128),
     "nope_clean_hd128": ("Q35M_clean_sdpa_ffn8_hd128_11785_nope", "qwen35_m.yaml", "gqa", "gated_deltanet", None, "ffn", "sdpa", G128),
     "nope_dm_stale_hd128": ("Q35M_dm_stale_ffn8_qkvo8_hd128_11785_nope", "qwen35_m.yaml", "dm", "gated_deltanet", "stale", "ffn_qkvo", None, G128),
@@ -48,6 +49,12 @@ ARMS = {
     "kda_clean_hd128": ("Q35KDA_clean_sdpa_ffn8_hd128_11785", "qwen35_m_kda.yaml", "gqa", "kda", None, "ffn", "sdpa", G128),
     "kda_dm_stale_hd128": ("Q35KDA_dm_stale_ffn8_qkvo8_hd128_11785", "qwen35_m_kda.yaml", "dm", "kda", "stale", "ffn_qkvo", None, G128),
     "kda_dm_matched_hd128": ("Q35KDA_dm_matched_ffn8_qkvo8_hd128_11785", "qwen35_m_kda.yaml", "dm", "kda", "matched", "ffn_qkvo", None, G128),
+    "l_kda_clean_hd256": ("Q35LKDA_clean_fa3_ffn8_11785", "qwen35_l_kda.yaml", "gqa", "kda", None, "ffn", "flash", L256),
+    "l_kda_dm_stale_hd256": ("Q35LKDA_dm_stale_ffn8_qkvo8_11785", "qwen35_l_kda.yaml", "dm", "kda", "stale", "ffn_qkvo", None, L256),
+    "l_kda_dm_matched_hd256": ("Q35LKDA_dm_matched_ffn8_qkvo8_11785", "qwen35_l_kda.yaml", "dm", "kda", "matched", "ffn_qkvo", None, L256),
+    "xl_clean_hd256": ("Q35XL_clean_fa3_ffn8_11785", "qwen35_xl.yaml", "gqa", "gated_deltanet", None, "ffn", "flash", L256),
+    "xl_dm_stale_hd256": ("Q35XL_dm_stale_ffn8_qkvo8_11785", "qwen35_xl.yaml", "dm", "gated_deltanet", "stale", "ffn_qkvo", None, L256),
+    "xl_dm_matched_hd256": ("Q35XL_dm_matched_ffn8_qkvo8_11785", "qwen35_xl.yaml", "dm", "gated_deltanet", "matched", "ffn_qkvo", None, L256),
     "gqa_clean_hd128": ("Q3M_clean_sdpa_ffn8_hd128_11785", "qwen3_m.yaml", "gqa", None, None, "ffn", "sdpa", Q3M),
     "gqa_dm_stale_hd128": ("Q3M_dm_stale_ffn8_qkvo8_hd128_11785", "qwen3_m.yaml", "dm", None, "stale", "ffn_qkvo", None, Q3M),
     "gqa_dm_matched_hd128": ("Q3M_dm_matched_ffn8_qkvo8_hd128_11785", "qwen3_m.yaml", "dm", None, "matched", "ffn_qkvo", None, Q3M),
@@ -116,7 +123,7 @@ def setups(tmp_path_factory):
 
 def test_every_arm_is_in_the_header_and_the_table(tmp_path):
     arms = _listed_arms(tmp_path)
-    assert len(arms) == len(set(arms)) == 32, arms
+    assert len(arms) == len(set(arms)) == 39, arms
     missing_header = sorted(set(arms) - _header_words())
     assert not missing_header, f"arms listed by dm_arms but missing from the arms.sh header: {missing_header}"
     assert set(arms) == set(ARMS), f"dm_arms vs this test's table: only in arms.sh {sorted(set(arms) - set(ARMS))}, only here {sorted(set(ARMS) - set(arms))}"
@@ -153,6 +160,10 @@ def test_arm_setup(arm, setups):
         assert m.attn_impl == impl, m.attn_impl
     assert bool(getattr(m, "nope", False)) is arm.startswith("nope_"), f"{arm}: nope={getattr(m, 'nope', None)}"
     assert (c.optim.name == "muon") is arm.startswith("muon_"), f"{arm}: optim.name={c.optim.name}"
+    # activation checkpointing: off for every arm (COMMON) but the 9.3 B xl_ cell, which does not fit 80 GB without it
+    assert c.gradient_checkpointing is arm.startswith("xl_"), f"{arm}: gradient_checkpointing={c.gradient_checkpointing}"
+    if arm.startswith("xl_"):
+        assert c.ac_mode == "selective", c.ac_mode
 
 
 def test_run_name_helper_and_tag(tmp_path):

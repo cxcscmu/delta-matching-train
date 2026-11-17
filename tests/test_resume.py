@@ -1,6 +1,9 @@
 """The resume pipeline a run that may be stopped relies on: periodic checkpoints and exact resume, a
-SIGTERM that saves a checkpoint and exits 75, a time budget (DM_STOP_BEFORE) that does the same, the local metrics log
-with its events, and the idempotent finish (relaunching a completed run only re-exports)."""
+SIGTERM that saves a checkpoint and exits 75, a time budget (DM_STOP_BEFORE) already spent at startup that stops
+before the first step (exit 75, nothing trained or saved; a run resumed at max_steps still exports), the run identity
+(a resume with another horizon is refused unless DM_ALLOW_RUN_CHANGE=1), the local metrics log with its events, and
+the idempotent finish (relaunching a completed run only re-exports). The same paths on CPU, with injected faults:
+tests/test_resume_cpu.py; the loss equality of a resumed run: tests/test_resume_exactness_cpu.py."""
 import os, signal, subprocess, time
 import pytest
 from _helpers import REPO, base_env, tiny_cmd, train_tiny, read_metrics
@@ -21,14 +24,18 @@ def _ckpts(run_root, name):
 
 
 def test_periodic_checkpoint_and_exact_resume(run_root, root, tok_dir, test_gpu):
+    """A first leg to step 6 of a 9-step horizon (stop_at_step keeps the schedule of the whole run), then the rest:
+    the relaunch resumes from checkpoint-6, passes the data-order sanity check and continues. A relaunch with another
+    horizon is then refused (the run identity), unless DM_ALLOW_RUN_CHANGE=1."""
     name = "tiny_resume"
-    rc, log, hf, _ = train_tiny(name, run_root, root, tok_dir, test_gpu, steps=6, extra_args=["--save_interval", "3"] + LOGGING)
+    rc, log, hf, _ = train_tiny(name, run_root, root, tok_dir, test_gpu, steps=9,
+                                extra_args=["--save_interval", "3", "--stop_at_step", "6"] + LOGGING)
     assert rc == 0, log[-3000:]
     assert _ckpts(run_root, name) == _kept([3, 6], 1), _ckpts(run_root, name)   # save_total_limit 1 (tiny config)
     m1 = read_metrics(run_root, name)
     assert [r["event"] for r in m1 if r["event"] != "metrics"] == ["start", "checkpoint", "checkpoint", "export", "complete"], [r["event"] for r in m1]
     assert sorted(r["step"] for r in m1 if r["event"] == "metrics") == list(range(6))
-    # relaunch with a longer horizon: it must resume from checkpoint-6, pass the data-order sanity check, and continue
+    # relaunch without the stop: it must resume from checkpoint-6, pass the data-order sanity check, and continue
     rc, log, hf, _ = train_tiny(name, run_root, root, tok_dir, test_gpu, steps=9, extra_args=["--save_interval", "3"] + LOGGING)
     assert rc == 0, log[-3000:]
     assert "checkpoint-6" in log and "Resumed from" in log, log[-3000:]
@@ -40,6 +47,14 @@ def test_periodic_checkpoint_and_exact_resume(run_root, root, tok_dir, test_gpu)
     assert steps_after == [6, 7, 8], steps_after
     assert (hf / "config.json").exists()
     assert _ckpts(run_root, name) == _kept([3, 6, 9], 1), _ckpts(run_root, name)
+    # another horizon would continue a different run: refused before any state is loaded ...
+    rc, log, hf, _ = train_tiny(name, run_root, root, tok_dir, test_gpu, steps=12, extra_args=["--save_interval", "3"] + LOGGING)
+    assert rc == 2 and "num_steps: 9 -> 12" in log and "DM_ALLOW_RUN_CHANGE" in log, log[-3000:]   # 2: not retried
+    assert _ckpts(run_root, name) == _kept([3, 6, 9], 1)
+    # ... unless allowed: then it continues from checkpoint-9 (the change is recorded in run_identity.json)
+    rc, log, hf, _ = train_tiny(name, run_root, root, tok_dir, test_gpu, steps=12, extra_args=["--save_interval", "3"] + LOGGING,
+                                extra_env={"DM_ALLOW_RUN_CHANGE": "1"})
+    assert rc == 0 and "checkpoint-9" in log and "Training complete at step 12" in log, log[-3000:]
 
 
 def test_finished_run_relaunch_is_idempotent(run_root, root, tok_dir, test_gpu):
@@ -86,15 +101,28 @@ def test_sigterm_saves_checkpoint_exits_75_and_resumes(run_root, root, tok_dir, 
     assert (hf2 / "config.json").exists() and f"Training complete at step {stop_at}" in log
 
 
-def test_deadline_saves_checkpoint_and_exits_75(run_root, root, tok_dir, test_gpu):
-    """A time budget that has already run out (DM_STOP_BEFORE = now): the trainer stops at the first step boundary,
-    saves a complete checkpoint there and exits 75 without exporting, however fast the node is."""
+def test_spent_deadline_stops_before_the_first_step_and_exits_75(run_root, root, tok_dir, test_gpu):
+    """A time budget that has already run out at startup (DM_STOP_BEFORE = now): the trainer stops before the first
+    step (whose compile and autotune alone take minutes) and exits 75 without training, saving or exporting: a fresh
+    run has nothing to save, a resumed run's newest checkpoint already holds the state. A run resumed AT max_steps (a
+    finished run whose export is missing) still exports."""
     name = "tiny_deadline"
-    rc, log, hf, _ = train_tiny(name, run_root, root, tok_dir, test_gpu, steps=400,
-                                extra_args=["--save_interval", "1000"] + LOGGING,
-                                extra_env={"DM_STOP_BEFORE": str(int(time.time()))})
+    late = lambda: {"DM_STOP_BEFORE": str(int(time.time()))}  # noqa: E731
+    rc, log, hf, _ = train_tiny(name, run_root, root, tok_dir, test_gpu, steps=4,
+                                extra_args=["--save_interval", "1000"] + LOGGING, extra_env=late())
     assert rc == 75, f"exit {rc}; tail:\n{log[-3000:]}"
-    assert _ckpts(run_root, name) == [(1, True)], _ckpts(run_root, name)
-    stop = [r for r in read_metrics(run_root, name) if r["event"] == "stop"]
-    assert stop and stop[-1]["reason"] == "deadline" and stop[-1]["step"] == 1 and "Stopping early (deadline)" in log, stop
+    assert _ckpts(run_root, name) == [], _ckpts(run_root, name)
+    m = read_metrics(run_root, name)
+    stop = [r for r in m if r["event"] == "stop"]
+    assert stop and stop[-1]["reason"] == "deadline" and stop[-1]["step"] == 0 and stop[-1].get("before_first_step"), stop
+    assert "Stopping early (deadline)" in log and not [r for r in m if r["event"] == "metrics"], "trained with a stop pending"
     assert not (hf / "config.json").exists(), "an early stop must not export"
+    rc, log, hf, _ = train_tiny(name, run_root, root, tok_dir, test_gpu, steps=4, extra_args=["--stop_at_step", "2"] + LOGGING)
+    assert rc == 0 and _ckpts(run_root, name) == [(2, True)], log[-3000:]     # a first leg: checkpoint-2
+    rc, log, hf, _ = train_tiny(name, run_root, root, tok_dir, test_gpu, steps=4, extra_args=LOGGING, extra_env=late())
+    assert rc == 75 and "before the first step" in log and _ckpts(run_root, name) == [(2, True)], log[-3000:]
+    rc, log, hf, _ = train_tiny(name, run_root, root, tok_dir, test_gpu, steps=4, extra_args=LOGGING)
+    assert rc == 0 and (hf / "config.json").exists() and _ckpts(run_root, name) == [(4, True)], log[-3000:]
+    (hf / "config.json").unlink()                                             # the export is lost ...
+    rc, log, hf, _ = train_tiny(name, run_root, root, tok_dir, test_gpu, steps=4, extra_args=LOGGING, extra_env=late())
+    assert rc == 0 and "already complete" in log and (hf / "config.json").exists(), log[-3000:]   # ... and redone

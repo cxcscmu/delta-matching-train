@@ -1,0 +1,40 @@
+{
+  "what": "the fp8 attention kernel package bundled with delta-matching-train (kernels/delta-matching, import name delta_matching)",
+  "variant": "kda-sm90-clean: the original Delta-Matching kernel evolved by the kernel design agent (KDA)",
+  "source": {
+    "repository": "https://github.com/haok1402/delta-matching",
+    "branch": "kda-sm90-clean",
+    "commit": "5a512e6541d991f7daeed6dc9d4de5c00cabca25",
+    "vendored_paths": ["benchmarks", "csrc", "delta_matching", "tests", "LICENSE", "MANIFEST.in", "NOTICE", "pyproject.toml",
+                       "README.md", "setup.py", "THIRD_PARTY_NOTICES.md", ".gitmodules", ".gitignore"],
+    "not_vendored": ["asset/ (blog post media)", ".github/", "third_party/flash-attention (fetched by scripts/install_kernel.sh)"]
+  },
+  "code_sha": "9fe8da5f743a",
+  "code_sha_note": "delta_matching._buildcfg.csrc_sha(): sha256 over the sorted csrc/*.{cpp,cu,h,hpp} names and bytes, first 12 hex digits; kernel_version()['code_sha'] of a library built from this tree",
+  "py_sha": "438885e62436",
+  "py_sha_note": "the Python half (the fp8 producers, the backward split, ...), which code_sha does not cover: sha256 over the sorted delta_matching/*.py names and bytes except the build stamp _build_info.py, first 12 hex digits (src/pretrain/trainer/base_trainer.py kernel_py_sha; every checkpoint records it)",
+  "base": {
+    "repository": "https://github.com/jet-ai-projects/delta-matching",
+    "commit": "51ea382 (release 3d4cd5bc900a8d7556b8b1601f47587456ed72bb + a .gitignore line)",
+    "code_sha": "5905517248c5",
+    "py_sha": "958769f516d4"
+  },
+  "validated_in_training": {
+    "commit": "ed9d7519345f7fbe63ae0f1c51f2f11c0310649a",
+    "code_sha": "14dba8c69018",
+    "relation": "ed9d751 and 5a512e6 differ only in comments and docstrings (csrc/fp11_delta_v6.h, mainloop_bwd_sm90_fp8r.hpp, mainloop_fwd_sm90_fp8f.hpp, softmax_fq8f.h, delta_matching/producers.py, split.py, tests); the compiled code is the same"
+  },
+  "build_dependencies": {
+    "flash_attention_commit": "0251105a2fb19d2957484b7f023cd8c115286ced",
+    "cutlass_commit": "7127592069c2fe01b041e174ba4345ef9b279671",
+    "toolchain": "nvcc 13.0, torch 2.12.0+cu130, sm_90a"
+  },
+  "certified_flags_changed_vs_base": {
+    "FA3FP11_HD128_P2ST": "2 -> 3",
+    "FA3FP11_HD128_BN256": "1 -> 0",
+    "FA3FP11_HD128_BM192": "new, 1",
+    "FA3FP11_HD128_FWDST": "new, 3",
+    "FA3FP11_HD128_FWDLAZY": "new, 1",
+    "FA3FP11_HD128_FWDDFOLD": "new, 1"
+  }
+}

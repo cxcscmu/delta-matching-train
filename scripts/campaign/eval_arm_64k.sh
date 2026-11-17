@@ -9,6 +9,16 @@
 #   8. MMLU (offline cache)
 # Output: $DM_WORKSPACE/qwen35_m/eval/<run_name>/ (valce64k_n<W>.txt + <run>_64k_n<W>_perwindow.npy, valce_n2000.txt +
 # <run>_n2000_perwindow.npy, <cfg>/<cfg>_results.json + .complete). EVAL64K_COMPLETE when all eight are present.
+# One evaluation per run, as in eval_arm.sh: an flock on <output dir>/.lock (fd 8), held by this script for the whole
+# evaluation (the benchmarks' torchrun workers do not inherit it); another live job holding it: exit 3.
+# In a chain (DM_PROGRESS_FILE) the exit appends "eval <run> <n>" when this invocation added n >= 1 completion markers
+# under the output dir and "eval_complete <run>" when it wrote EVAL64K_COMPLETE, also after a SIGTERM. Each val CE
+# counts as one: valce64k_n<W>.complete / valce_n2000.complete, written when this invocation scored it (completeness
+# is still judged by the RESULT line and the per-window artifact).
+# The val CEs' rendezvous port: DM_VALCE_PORT (job.sh sets one per job), else 29820 + DM_VALCE_GPU.
+# Exit status: 0 complete; 1 incomplete (or the lock was not released within DM_LOCK_WAIT: a failure to retry); 2 a
+# missing or unpatched export or val set; 3 the run is being evaluated by another live job; 143 / 130 stopped by
+# SIGTERM / SIGINT.
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd); source "$HERE/env.sh"
 RN=${1:?run_name}; NW64=${2:-256}; NW=2000
@@ -37,6 +47,24 @@ stop_if_signalled () { [ "$STOP" -eq 0 ] || { say "stopped by a signal (a benchm
 [ -f "$HFDIR/model.safetensors" ] || { say "FATAL: no export at $HFDIR"; exit 2; }
 [ -f "$VAL64" ] || { say "FATAL: 64k val missing at $VAL64"; exit 2; }
 [ -f "$OUT/EVAL64K_COMPLETE" ] && { say "$RN 64k eval already complete"; exit 0; }
+# one evaluation per run: the lock is held from here on by this script (fd 8; see the header). A stop signal ends a
+# wait for it (dm_lock asks dm_lock_stop between its looks at the holder: the trap above only counts the signal)
+dm_lock_stop () { [ "$STOP" -gt 0 ]; }
+dm_lock 8 "$OUT/.lock" "$RN is being evaluated"; LRC=$?
+stop_if_signalled
+[ "$LRC" = 0 ] || exit "$LRC"
+[ -f "$OUT/EVAL64K_COMPLETE" ] && { say "$RN 64k eval already complete (by the job that held its lock)"; exit 0; }
+# the progress lines of this invocation, written at its exit (a chain's progress gate, scripts/slurm/job.sh)
+EV_N0=0; [ -n "${DM_PROGRESS_FILE:-}" ] && EV_N0=$(dm_eval_markers "$OUT")
+eval_progress () {
+  [ -n "${DM_PROGRESS_FILE:-}" ] || return 0
+  trap '' TERM INT   # a late signal must not cut the lines short
+  local n; n=$(dm_eval_markers "$OUT")
+  [ "$n" -gt "$EV_N0" ] && dm_progress eval "$RN" $((n - EV_N0))
+  [ -f "$OUT/EVAL64K_COMPLETE" ] && dm_progress eval_complete "$RN"
+  return 0
+}
+trap eval_progress EXIT
 cd "$DM_REPO" || exit 2; export PYTHONPATH=$DM_REPO/src${PYTHONPATH:+:$PYTHONPATH}
 # W&B off, as in eval_arm.sh: otherwise RULER and the lm-eval benchmarks open W&B runs of their own and MQAR logs into
 # the training run; the results are the artifacts in $OUT
@@ -55,16 +83,18 @@ valce_ok () {   # $1 = tag (64k|8k), $2 = windows requested, $3 = perwindow stem
   w=$(grep -a "memmap-ppl RESULT" "$txt" 2>/dev/null | tail -n 1 | grep -oE "windows=[0-9]+" | cut -d= -f2)
   [ -n "$w" ] && [ "$w" -ge $(( $2 - 1 )) ] && "$PY" -c "import numpy as np,sys; a=np.load(sys.argv[1]); sys.exit(0 if a.ndim==2 and a.shape[0]==2 and a.shape[1]==int(sys.argv[2]) and np.isfinite(a[1]).all() else 1)" "$OUT/${3}_n${2}_perwindow.npy" "$w" 2>/dev/null; }
 if valce_ok 64k "$NW64" "${RN}_64k"; then say "val CE 64k already done"; else
-  say "1/8 val CE @ $NW64 windows of 65,536"; rm -f "$OUT/valce64k_n${NW64}.txt" "$OUT/${RN}_64k_n${NW64}_perwindow.npy"
-  RANK=0 LOCAL_RANK=0 WORLD_SIZE=1 MASTER_ADDR=127.0.0.1 MASTER_PORT=$((29820 + ${DM_VALCE_GPU:-0})) CUDA_VISIBLE_DEVICES=${DM_VALCE_GPU:-0} "$PY" -m evaluation.ppl.memmap_ppl --model_name_or_path "$HFDIR" --data "$VAL64" --dtype uint16 --seq_len 65536 \
+  say "1/8 val CE @ $NW64 windows of 65,536"; rm -f "$OUT/valce64k_n${NW64}.txt" "$OUT/${RN}_64k_n${NW64}_perwindow.npy" "$OUT/valce64k_n${NW64}.complete"
+  RANK=0 LOCAL_RANK=0 WORLD_SIZE=1 MASTER_ADDR=127.0.0.1 MASTER_PORT=${DM_VALCE_PORT:-$((29820 + ${DM_VALCE_GPU:-0}))} CUDA_VISIBLE_DEVICES=${DM_VALCE_GPU:-0} "$PY" -m evaluation.ppl.memmap_ppl --model_name_or_path "$HFDIR" --data "$VAL64" --dtype uint16 --seq_len 65536 \
       --max_windows "$NW64" --batch_size 1 --output_dir "$OUT" --run_name "${RN}_64k_n${NW64}" > "$OUT/valce64k_n${NW64}.txt" 2>&1 || say "  (val CE 64k rc=$?)"
+  valce_ok 64k "$NW64" "${RN}_64k" && date '+%F %T' > "$OUT/valce64k_n${NW64}.complete"   # progress accounting only (dm_eval_markers)
 fi
 grep -a "memmap-ppl RESULT" "$OUT/valce64k_n${NW64}.txt" 2>/dev/null | tail -1 | tee -a "$LOG"
 stop_if_signalled
 if valce_ok "" "$NW" "$RN"; then say "val CE 8k already done"; else
-  say "2/8 val CE @ $NW windows of 8,192 (Nemotron held-out)"; rm -f "$OUT/valce_n${NW}.txt" "$OUT/${RN}_n${NW}_perwindow.npy"
-  RANK=0 LOCAL_RANK=0 WORLD_SIZE=1 MASTER_ADDR=127.0.0.1 MASTER_PORT=$((29820 + ${DM_VALCE_GPU:-0})) CUDA_VISIBLE_DEVICES=${DM_VALCE_GPU:-0} "$PY" -m evaluation.ppl.memmap_ppl --model_name_or_path "$HFDIR" --data "$VAL8" --dtype uint16 --seq_len 8192 \
+  say "2/8 val CE @ $NW windows of 8,192 (Nemotron held-out)"; rm -f "$OUT/valce_n${NW}.txt" "$OUT/${RN}_n${NW}_perwindow.npy" "$OUT/valce_n${NW}.complete"
+  RANK=0 LOCAL_RANK=0 WORLD_SIZE=1 MASTER_ADDR=127.0.0.1 MASTER_PORT=${DM_VALCE_PORT:-$((29820 + ${DM_VALCE_GPU:-0}))} CUDA_VISIBLE_DEVICES=${DM_VALCE_GPU:-0} "$PY" -m evaluation.ppl.memmap_ppl --model_name_or_path "$HFDIR" --data "$VAL8" --dtype uint16 --seq_len 8192 \
       --max_windows "$NW" --batch_size 4 --output_dir "$OUT" --run_name "${RN}_n${NW}" > "$OUT/valce_n${NW}.txt" 2>&1 || say "  (val CE 8k rc=$?)"
+  valce_ok "" "$NW" "$RN" && date '+%F %T' > "$OUT/valce_n${NW}.complete"   # progress accounting only (dm_eval_markers)
 fi
 grep -a "memmap-ppl RESULT" "$OUT/valce_n${NW}.txt" 2>/dev/null | tail -1 | tee -a "$LOG"
 stop_if_signalled
@@ -97,9 +127,11 @@ run_cfg ruler_llama2_64k "$OUT/ruler_llama2_64k.yaml" 4 1
 run_cfg commonsense src/evaluation/configs/commonsense.yaml 32
 run_cfg recall_extraction src/evaluation/configs/recall_extraction.yaml 32 1
 run_cfg triviaqa src/evaluation/configs/triviaqa.yaml 32 1
+export HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1   # MQAR and MMLU from the cache only, as in eval_arm.sh (docs/SETUP.md section 9)
 run_cfg recall_synthetic "$OUT/recall_synthetic.yaml" 16   # the YAML's batch_size (8) wins over this value
 mqar_mark
 if [ -d "$HF_HOME/datasets/cais___mmlu" ]; then run_cfg mmlu src/evaluation/configs/mmlu.yaml 16; else say "SKIP mmlu: cais___mmlu not in $HF_HOME/datasets"; fi
+unset HF_HUB_OFFLINE HF_DATASETS_OFFLINE
 MISSING=(); valce_ok 64k "$NW64" "${RN}_64k" || MISSING+=(valce64k); valce_ok "" "$NW" "$RN" || MISSING+=(valce8k)
 for c in ruler_llama2_64k commonsense recall_extraction triviaqa recall_synthetic mmlu; do [ -f "$OUT/$c/${c}_results.complete" ] || MISSING+=("$c"); done
 say "tracebacks in the benchmark logs: $(cat "$OUT"/*.txt 2>/dev/null | grep -aci traceback)"

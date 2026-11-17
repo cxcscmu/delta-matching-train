@@ -63,7 +63,7 @@ def test_repo_modules_import():
 
 
 def test_delta_matching_package_importable():
-    """The fp8 attention kernel is the separate delta_matching package (docs/SETUP.md section 3): its public API imports
+    """The fp8 attention kernel is the delta_matching package (bundled at kernels/delta-matching; docs/SETUP.md section 3): its public API imports
     without a GPU; the compiled library is checked by the gpu tests below."""
     require_kernel()
     import delta_matching
